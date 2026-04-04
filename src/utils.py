@@ -1,495 +1,686 @@
 """
-Utility functions for the Crawl4AI MCP server, using PostgreSQL with SQLModel/pgvector
-and Ollama for embeddings.
+Utility functions for the Crawl4AI MCP server.
+PostgreSQL/pgvector backend with dual embedding provider (OpenAI or Ollama).
 """
+import asyncio
 import logging
 import os
 import json
-import time
-import requests
-import concurrent.futures
 from enum import Enum
 from typing import List, Dict, Any, Optional, Generator, Tuple
 
-from requests.exceptions import RequestException, Timeout, HTTPError, JSONDecodeError
+import httpx
+import numpy as np
+from openai import AsyncOpenAI
 from pydantic import HttpUrl, PostgresDsn, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from sqlmodel import Field, SQLModel, create_engine, Session, select, JSON, Column
+from sqlmodel import Field, SQLModel, create_engine, Session, select, Column
 from sqlalchemy import text
-from sqlalchemy.dialects.postgresql import JSONB # Use JSONB for better performance and indexing
-from pgvector.sqlalchemy import Vector # Import Vector type
+from sqlalchemy.dialects.postgresql import JSONB
+from pgvector.sqlalchemy import Vector
 from sqlalchemy.exc import SQLAlchemyError
-import numpy as np
-from scipy.spatial.distance import cosine as scipy_cosine_distance
 
 logger = logging.getLogger(__name__)
 
-# --- Custom Exceptions ---
-class OllamaError(Exception):
-    """Custom exception for Ollama API errors."""
-    pass
 
+# ---------------------------------------------------------------------------
+# Custom exceptions
+# ---------------------------------------------------------------------------
+class EmbeddingError(Exception):
+    """Raised when embedding creation fails."""
+
+
+# Keep legacy alias so old imports don't break during transition
+OllamaError = EmbeddingError
+
+
+# ---------------------------------------------------------------------------
+# Enums
+# ---------------------------------------------------------------------------
 class ChunkStrategy(str, Enum):
     PARAGRAPH = "paragraph"
     SENTENCE = "sentence"
     FIXED = "fixed"
     SEMANTIC = "semantic"
 
-# --- Application Settings ---
+
+class EmbeddingProvider(str, Enum):
+    OPENAI = "openai"
+    OLLAMA = "ollama"
+
+
+# ---------------------------------------------------------------------------
+# Application settings
+# ---------------------------------------------------------------------------
 class Settings(BaseSettings):
     POSTGRES_URL: PostgresDsn
-    OLLAMA_API_URL: HttpUrl
-    OLLAMA_EMBED_MODEL: str
-    OLLAMA_EMBEDDING_DIM: int = 768
-    BATCH_SIZE: int = 50
+
+    # Embedding provider: "openai" or "ollama"
+    EMBEDDING_PROVIDER: EmbeddingProvider = EmbeddingProvider.OLLAMA
+    EMBEDDING_DIM: int = 768
+
+    # Ollama settings (used when EMBEDDING_PROVIDER=ollama)
+    OLLAMA_API_URL: str = "http://localhost:11434/api/embeddings"
+    OLLAMA_EMBED_MODEL: str = "nomic-embed-text"
     OLLAMA_MAX_RETRIES: int = 3
     OLLAMA_RETRY_DELAY_SECONDS: float = 1.0
+
+    # OpenAI settings (used when EMBEDDING_PROVIDER=openai)
+    OPENAI_API_KEY: Optional[str] = None
+    OPENAI_EMBED_MODEL: str = "text-embedding-3-small"
+    OPENAI_BASE_URL: Optional[str] = None  # Override for Ollama OpenAI-compat endpoint
+
+    BATCH_SIZE: int = 50
 
     CHUNK_SIZE: int = 1000
     CHUNK_OVERLAP: int = 200
     CHUNK_STRATEGY: ChunkStrategy = ChunkStrategy.PARAGRAPH
-    SEMANTIC_CHUNKING: bool = False
 
+    # RAG feature flags
+    USE_CONTEXTUAL_EMBEDDINGS: bool = False
+    USE_HYBRID_SEARCH: bool = False
+    USE_AGENTIC_RAG: bool = False
+    USE_RERANKING: bool = False
+
+    # LLM for contextual embeddings
     LLM_ENABLED: bool = False
     LLM_API_KEY: Optional[str] = None
-    LLM_BASE_URL: Optional[HttpUrl] = None
+    LLM_BASE_URL: Optional[str] = None
     LLM_MODEL_NAME: Optional[str] = None
 
-    model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    @model_validator(mode='after')
-    def check_llm_config_if_enabled(cls, values: 'Settings') -> 'Settings':
-        if values.LLM_ENABLED:
-            if not values.LLM_API_KEY:
+    @model_validator(mode="after")
+    def check_llm_config_if_enabled(self) -> "Settings":
+        if self.LLM_ENABLED:
+            if not self.LLM_API_KEY:
                 raise ValueError("LLM_API_KEY must be set when LLM_ENABLED is true.")
-            if not values.LLM_BASE_URL:
+            if not self.LLM_BASE_URL:
                 raise ValueError("LLM_BASE_URL must be set when LLM_ENABLED is true.")
-            if not values.LLM_MODEL_NAME:
+            if not self.LLM_MODEL_NAME:
                 raise ValueError("LLM_MODEL_NAME must be set when LLM_ENABLED is true.")
-        return values
+        return self
+
+    @model_validator(mode="after")
+    def check_openai_config_if_selected(self) -> "Settings":
+        if self.EMBEDDING_PROVIDER == EmbeddingProvider.OPENAI and not self.OPENAI_API_KEY:
+            raise ValueError("OPENAI_API_KEY must be set when EMBEDDING_PROVIDER=openai.")
+        return self
+
 
 settings = Settings()
 
-# --- Database Setup ---
-connect_args = {}
-engine = create_engine(str(settings.POSTGRES_URL), echo=False, connect_args=connect_args)
+
+# ---------------------------------------------------------------------------
+# Database setup
+# ---------------------------------------------------------------------------
+engine = create_engine(str(settings.POSTGRES_URL), echo=False)
+
 
 class CrawledPage(SQLModel, table=True):
-    __tablename__ = "crawledpage"
+    __tablename__ = "crawled_pages"
     id: Optional[int] = Field(default=None, primary_key=True)
+    source_id: Optional[int] = Field(default=None, foreign_key="sources.id")
     url: str = Field(index=True)
     chunk_number: int
     content: str
     page_metadata: Dict[str, Any] = Field(default={}, sa_column=Column("metadata", JSONB))
-    embedding: List[float] = Field(sa_column=Column(Vector(settings.OLLAMA_EMBEDDING_DIM)))
+    embedding: List[float] = Field(sa_column=Column(Vector(settings.EMBEDDING_DIM)))
 
-def create_db_and_tables():
-    SQLModel.metadata.create_all(engine)
+
+class CodeExample(SQLModel, table=True):
+    __tablename__ = "code_examples"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    source_id: Optional[int] = Field(default=None, foreign_key="sources.id")
+    url: str = Field(index=True)
+    chunk_number: int
+    language: Optional[str] = None
+    content: str
+    summary: Optional[str] = None
+    ex_metadata: Dict[str, Any] = Field(default={}, sa_column=Column("metadata", JSONB))
+    embedding: List[float] = Field(sa_column=Column(Vector(settings.EMBEDDING_DIM)))
+
+
+class Source(SQLModel, table=True):
+    __tablename__ = "sources"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    source: str = Field(unique=True, index=True)
+    summary: Optional[str] = None
+
 
 def get_session() -> Generator[Session, None, None]:
     with Session(engine) as session:
         yield session
 
-# --- Embedding Functions (Using Ollama) ---
-def create_embedding(text: str, attempt: int = 1, requests_post=requests.post) -> List[float]:
+
+# ---------------------------------------------------------------------------
+# Embedding creation — async, dual provider
+# ---------------------------------------------------------------------------
+def _normalize(vec: List[float]) -> List[float]:
+    arr = np.array(vec, dtype=np.float32)
+    norm = np.linalg.norm(arr)
+    if norm == 0:
+        return vec
+    return (arr / norm).tolist()
+
+
+async def create_embedding(text: str) -> List[float]:
     """
-    Create an embedding for a single text using Ollama's API, with retry logic.
-    Normalizes the embedding.
+    Create a normalized embedding for a single text string.
+    Uses the provider configured in settings.EMBEDDING_PROVIDER.
     """
     if not text or not text.strip():
-        raise OllamaError("Attempted to create embedding for empty or whitespace-only string.")
+        raise EmbeddingError("Attempted to create embedding for empty string.")
 
+    if settings.EMBEDDING_PROVIDER == EmbeddingProvider.OPENAI:
+        return await _create_openai_embedding(text)
+    return await _create_ollama_embedding(text)
+
+
+async def _create_openai_embedding(text: str) -> List[float]:
+    """Create embedding via OpenAI (or OpenAI-compatible) API."""
+    client_kwargs: Dict[str, Any] = {"api_key": settings.OPENAI_API_KEY}
+    if settings.OPENAI_BASE_URL:
+        client_kwargs["base_url"] = settings.OPENAI_BASE_URL
+
+    client = AsyncOpenAI(**client_kwargs)
     try:
-        response = requests_post(
-            str(settings.OLLAMA_API_URL),
-            json={"model": settings.OLLAMA_EMBED_MODEL, "prompt": text},
-            timeout=60
+        resp = await client.embeddings.create(
+            model=settings.OPENAI_EMBED_MODEL,
+            input=text,
         )
-        response.raise_for_status()
-        result = response.json()
+        return _normalize(resp.data[0].embedding)
+    except Exception as exc:
+        raise EmbeddingError(f"OpenAI embedding failed: {exc}") from exc
+    finally:
+        await client.close()
 
-        embedding = result.get("embedding")
-        if embedding and isinstance(embedding, list) and len(embedding) == settings.OLLAMA_EMBEDDING_DIM:
-            np_embedding = np.array(embedding, dtype=np.float32)
-            norm = np.linalg.norm(np_embedding)
-            if norm == 0:
-                logger.warning("Zero vector received from Ollama before normalization. Returning as is.")
-                return embedding
-            normalized_embedding = np_embedding / norm
-            return normalized_embedding.tolist()
-        else:
-            error_message = f"Ollama response missing or invalid embedding format/dimension. Expected {settings.OLLAMA_EMBEDDING_DIM} dimensions."
-            logger.error(error_message)
-            raise OllamaError(error_message)
 
-    except (Timeout, ConnectionError) as e:
-        error_message = f"Ollama API request failed due to Timeout/ConnectionError: {e}"
-        logger.warning(f"Error (Attempt {attempt}/{settings.OLLAMA_MAX_RETRIES}): {error_message}")
-        if attempt < settings.OLLAMA_MAX_RETRIES:
-            delay = settings.OLLAMA_RETRY_DELAY_SECONDS * (2 ** (attempt - 1))
-            logger.info(f"Retrying in {delay:.2f} seconds...")
-            time.sleep(delay)
-            # Pass requests_post in recursive call
-            return create_embedding(text, attempt + 1, requests_post=requests_post)
-        else:
-            raise OllamaError(f"Failed after {settings.OLLAMA_MAX_RETRIES} attempts: {error_message}") from e
-    except HTTPError as http_err:
-        error_message = f"Ollama API request failed with HTTP status code: {http_err.response.status_code}"
-        try:
-            error_details = http_err.response.json()
-            error_message += f" - Details: {error_details}"
-        except JSONDecodeError:
-            error_message += " - Could not decode JSON error response from Ollama."
-        
-        logger.warning(f"Error (Attempt {attempt}/{settings.OLLAMA_MAX_RETRIES}): {error_message}")
-        if http_err.response.status_code >= 500 and attempt < settings.OLLAMA_MAX_RETRIES:
-            delay = settings.OLLAMA_RETRY_DELAY_SECONDS * (2 ** (attempt - 1))
-            logger.info(f"Retrying in {delay:.2f} seconds...")
-            time.sleep(delay)
-            # Pass requests_post in recursive call
-            return create_embedding(text, attempt + 1, requests_post=requests_post)
-        else:
-            raise OllamaError(f"HTTPError (not retrying or max retries reached): {error_message}") from http_err
-    except JSONDecodeError as e:
-        error_message = f"Failed to decode JSON response from Ollama API: {e}"
-        logger.error(f"Error: {error_message}")
-        raise OllamaError(error_message) from e
-    except RequestException as req_err:
-        error_message = f"Ollama API request failed due to a RequestException: {req_err}"
-        logger.error(f"Error: {error_message}")
-        raise OllamaError(error_message) from req_err
-    except Exception as e:
-        error_message = f"An unexpected error occurred during embedding creation: {e}"
-        logger.error(f"Error: {error_message}")
-        raise OllamaError(error_message) from e
+async def _create_ollama_embedding(text: str, attempt: int = 1) -> List[float]:
+    """Create embedding via Ollama REST API with retry logic."""
+    async with httpx.AsyncClient(timeout=60) as client:
+        for attempt in range(1, settings.OLLAMA_MAX_RETRIES + 1):
+            try:
+                resp = await client.post(
+                    settings.OLLAMA_API_URL,
+                    json={"model": settings.OLLAMA_EMBED_MODEL, "prompt": text},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                embedding = data.get("embedding")
+                if not embedding or not isinstance(embedding, list):
+                    raise EmbeddingError("Ollama returned invalid embedding format.")
+                return _normalize(embedding)
+            except (httpx.TimeoutException, httpx.ConnectError) as exc:
+                if attempt < settings.OLLAMA_MAX_RETRIES:
+                    delay = settings.OLLAMA_RETRY_DELAY_SECONDS * (2 ** (attempt - 1))
+                    await asyncio.sleep(delay)
+                    continue
+                raise EmbeddingError(
+                    f"Ollama request failed after {settings.OLLAMA_MAX_RETRIES} attempts: {exc}"
+                ) from exc
+            except httpx.HTTPStatusError as exc:
+                raise EmbeddingError(f"Ollama HTTP error {exc.response.status_code}: {exc}") from exc
+            except Exception as exc:
+                raise EmbeddingError(f"Unexpected embedding error: {exc}") from exc
+    raise EmbeddingError("Ollama embedding failed: exhausted retries")  # pragma: no cover
 
-def create_embeddings_batch(texts: List[str], requests_post=requests.post) -> List[List[float]]:
-    """
-    Create embeddings for multiple texts using Ollama (calling sequentially).
-    """
+
+async def create_embeddings_batch(texts: List[str]) -> List[List[float]]:
+    """Create embeddings for multiple texts in parallel."""
     if not texts:
         return []
-    embeddings = []
-    for text_item in texts:
-        # Pass requests_post to create_embedding
-        embedding = create_embedding(text_item, requests_post=requests_post)
-        embeddings.append(embedding)
-    return embeddings
+    return await asyncio.gather(*[create_embedding(t) for t in texts])
 
-# --- Contextual Embedding Functions ---
-def generate_contextual_embedding(full_document: str, chunk: str) -> Tuple[str, bool]:
+
+# ---------------------------------------------------------------------------
+# Contextual embedding (LLM enrichment)
+# ---------------------------------------------------------------------------
+async def generate_contextual_text(full_document: str, chunk: str) -> Tuple[str, bool]:
     """
-    Generate contextual information for a chunk within a document to improve retrieval.
+    Generate a contextual summary prefix for a chunk using an LLM.
+    Returns (enriched_text, was_enriched).
     """
-    if not settings.LLM_ENABLED:
-        logger.info("LLM_ENABLED is false. Skipping contextual embedding.")
+    if not settings.USE_CONTEXTUAL_EMBEDDINGS or not settings.LLM_ENABLED:
         return chunk, False
-        
-    if not settings.LLM_BASE_URL or not settings.LLM_API_KEY or not settings.LLM_MODEL_NAME:
-        logger.warning(
-            "LLM is enabled, but one or more required configurations "
-            "(LLM_BASE_URL, LLM_API_KEY, LLM_MODEL_NAME) are missing or empty. "
-            "Skipping contextual embedding."
-        )
-        return chunk, False
-            
+
     try:
-        prompt = f"""<document>
-{full_document[:25000]}
-</document>
-<chunk>
-{chunk}
-</chunk>
-Given the document and the specific chunk, generate a concise (1-2 sentence) summary that captures the main topic of the chunk AND its relationship to the surrounding document context. Focus on keywords and concepts that would help a semantic search system understand what this chunk is about in the broader document. Do not refer to "the chunk" or "the document" in your answer.
-Contextual Summary:"""
+        prompt = (
+            f"<document>\n{full_document[:25000]}\n</document>\n"
+            f"<chunk>\n{chunk}\n</chunk>\n"
+            "Given the document and the specific chunk, write a 1-2 sentence "
+            "summary capturing the chunk's topic and its relationship to the "
+            "wider document. Use keywords that help semantic search.\n"
+            "Summary:"
+        )
+        client = AsyncOpenAI(
+            api_key=settings.LLM_API_KEY,
+            base_url=settings.LLM_BASE_URL,
+        )
+        try:
+            resp = await client.chat.completions.create(
+                model=settings.LLM_MODEL_NAME,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=150,
+            )
+            context_text = resp.choices[0].message.content.strip()
+        finally:
+            await client.close()
 
-        headers = {
-            "Authorization": f"Bearer {settings.LLM_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": settings.LLM_MODEL_NAME,
-            "prompt": prompt,
-            "stream": False, # Ensure we get the full response
-            "max_tokens": 150 # Adjust as needed
-        }
-        
-        # Using requests.post directly here as it's for a different service (external LLM)
-        # and not the Ollama embedding service we are primarily testing/mocking.
-        # Ensure the URL ends with /chat/completions
-        llm_url = str(settings.LLM_BASE_URL)
-        if not llm_url.endswith('/chat/completions'):
-            llm_url = llm_url.rstrip('/') + '/chat/completions'
-        
-        response = requests.post(llm_url, headers=headers, json=payload, timeout=120)
-        response.raise_for_status()
-        
-        response_data = response.json()
-        
-        # Adjust based on actual API response structure
-        # Example for OpenRouter-like /v1/chat/completions or /v1/completions
-        contextual_info = ""
-        if "choices" in response_data and response_data["choices"]:
-            if "message" in response_data["choices"][0] and "content" in response_data["choices"][0]["message"]:
-                contextual_info = response_data["choices"][0]["message"]["content"].strip()
-            elif "text" in response_data["choices"][0]: # For older completion models
-                 contextual_info = response_data["choices"][0]["text"].strip()
-        elif "response" in response_data: # For some direct /generate endpoints
-            contextual_info = response_data["response"].strip()
-
-        print(f"DEBUG (utils): contextual_info before combining: {contextual_info}") # Added debug print
-        if contextual_info:
-            # Combine original chunk with contextual info for embedding
-            # This strategy aims to enrich the chunk's semantic meaning.
-            # Example: "Context: [Generated Context]. Original: [Chunk Content]"
-            # The exact format might need tuning based on embedding model performance.
-            # For now, let's prepend context.
-            # Max length check to avoid overly long strings for embedding
-            combined_text = f"Contextual Summary: {contextual_info}. Original Chunk: {chunk}"
-            logger.debug(f"Generated contextual text (first 100 chars): {combined_text[:100]}")
-            print(f"DEBUG (utils): combined_text before return: {combined_text}") # Added debug print
-            print(f"DEBUG (utils): Returning combined_text[:{settings.CHUNK_SIZE * 2}]") # Added debug print
-            return combined_text[:settings.CHUNK_SIZE * 2], True # Limit length
-        else:
-            logger.warning("LLM response did not contain expected contextual information.")
-            print(f"DEBUG (utils): Returning original chunk: {chunk}") # Added debug print
-            return chunk, False
-
-    except RequestException as e:
-        logger.error(f"Error calling LLM for contextual embedding: {e}")
+        if context_text:
+            combined = f"Context: {context_text}\n\n{chunk}"
+            return combined[: settings.CHUNK_SIZE * 2], True
         return chunk, False
-    except Exception as e:
-        logger.error(f"Unexpected error in generate_contextual_embedding: {e}")
+    except Exception as exc:
+        logger.warning(f"Contextual embedding LLM call failed: {exc}")
         return chunk, False
 
-# --- Database Operations ---
-def add_documents_to_db(
+
+# ---------------------------------------------------------------------------
+# Source upsert
+# ---------------------------------------------------------------------------
+def upsert_source(session: Session, source: str) -> int:
+    """Insert or return id of a source record."""
+    existing = session.exec(select(Source).where(Source.source == source)).first()
+    if existing:
+        return existing.id
+    obj = Source(source=source)
+    session.add(obj)
+    session.commit()
+    session.refresh(obj)
+    return obj.id
+
+
+# ---------------------------------------------------------------------------
+# Document storage
+# ---------------------------------------------------------------------------
+async def add_documents_to_db(
     session: Session,
     urls: List[str],
     contents: List[str],
-    page_metadatas: List[Dict[str, Any]],
+    metadatas: List[Dict[str, Any]],
     chunk_numbers: List[int],
-    full_documents: Optional[List[str]] = None # For contextual embeddings
-):
+    full_documents: Optional[List[str]] = None,
+) -> int:
     """
-    Adds a batch of documents to the PostgreSQL database.
-    Deletes existing documents with the same URL before adding new ones.
+    Embed and store a batch of text chunks into crawled_pages.
+    Deletes existing rows for those URLs first (upsert semantics).
+    Returns total rows inserted.
     """
-    #print('urls: ',urls)
-    #print('len(urls): ',len(urls))
-    #print('full_documents: ',Optional[List[str]])
-    #print('len(full_documents): ',len(full_documents))
-    if not urls or not contents or not page_metadatas or not chunk_numbers:
-        print("One of the input lists (urls, contents, page_metadatas, chunk_numbers) is empty. No documents to add.")
-        return
+    if not urls:
+        return 0
 
-    if len(urls) != len(contents) or len(urls) != len(page_metadatas) or len(urls) != len(chunk_numbers):
-        print("Input lists (urls, contents, page_metadatas, chunk_numbers) have different lengths. Aborting.")
-        return
-        
-    if full_documents and len(urls) != len(full_documents):
-        print("If full_documents is provided, it must have the same length as other input lists. Aborting.")
-        return
+    # Validate lengths
+    if not (len(urls) == len(contents) == len(metadatas) == len(chunk_numbers)):
+        logger.error("Input list lengths mismatch in add_documents_to_db.")
+        return 0
 
-    # Delete existing documents for the given URLs first
-    # This is done once for all unique URLs in the batch.
-    unique_urls_to_delete = list(set(urls))
-    if unique_urls_to_delete:
-        try:
-            # print(f"Deleting existing documents for URLs: {unique_urls_to_delete}")
-            statement = select(CrawledPage).where(CrawledPage.url.in_(unique_urls_to_delete))
-            results_to_delete = session.exec(statement).all()
-            for doc_to_delete in results_to_delete:
-                session.delete(doc_to_delete)
-            if results_to_delete: # Only commit if there was something to delete
-                session.commit()
-                # print(f"Successfully deleted {len(results_to_delete)} existing documents.")
-        except SQLAlchemyError as e:
-            print(f"Error deleting existing documents: {e}. Proceeding with adding new documents.")
-            session.rollback() # Rollback deletion attempt
-        except Exception as e: # Catch any other unexpected error during deletion
-            print(f"Unexpected error during deletion of existing documents: {e}. Proceeding with adding new documents.")
-            session.rollback()
+    # Collect valid items (non-empty content)
+    valid = [
+        (u, c, m, n, (full_documents[i] if full_documents else None))
+        for i, (u, c, m, n) in enumerate(zip(urls, contents, metadatas, chunk_numbers))
+        if c and c.strip()
+    ]
+    if not valid:
+        return 0
 
+    v_urls, v_contents, v_metas, v_chunks, v_fulldocs = zip(*valid)
 
+    # Delete existing rows (upsert)
+    unique_urls = list(set(v_urls))
+    try:
+        to_delete = session.exec(select(CrawledPage).where(CrawledPage.url.in_(unique_urls))).all()
+        for row in to_delete:
+            session.delete(row)
+        if to_delete:
+            session.commit()
+    except SQLAlchemyError as exc:
+        logger.warning(f"Delete before insert failed: {exc}")
+        session.rollback()
+
+    # Apply contextual enrichment if enabled
+    if settings.USE_CONTEXTUAL_EMBEDDINGS and settings.LLM_ENABLED and full_documents:
+        enriched = await asyncio.gather(
+            *[generate_contextual_text(fd or "", c) for c, fd in zip(v_contents, v_fulldocs)]
+        )
+        embed_texts = [e[0] for e in enriched]
+    else:
+        embed_texts = list(v_contents)
+
+    # Embed in batches
     total_added = 0
-    current_batch_size = settings.BATCH_SIZE
-
-    for i in range(0, len(urls), current_batch_size):
-        batch_urls = urls[i:i + current_batch_size]
-        batch_contents = contents[i:i + current_batch_size]
-        batch_page_metadatas = page_metadatas[i:i + current_batch_size]
-        batch_chunk_numbers = chunk_numbers[i:i + current_batch_size]
-        batch_full_documents = full_documents[i:i + current_batch_size] if full_documents else [None] * len(batch_urls)
-
-        # Filter out items with empty content *before* attempting contextual embedding or regular embedding
-        # This ensures we don't try to process invalid data.
-        current_valid_urls = []
-        current_valid_contents = []
-        current_valid_page_metadatas = []
-        current_valid_chunk_numbers = []
-        current_valid_full_documents = [] # For contextual
-
-        for idx in range(len(batch_contents)):
-            if batch_contents[idx] and batch_contents[idx].strip():
-                current_valid_urls.append(batch_urls[idx])
-                current_valid_contents.append(batch_contents[idx])
-                current_valid_page_metadatas.append(batch_page_metadatas[idx])
-                current_valid_chunk_numbers.append(batch_chunk_numbers[idx])
-                if full_documents: # Only append if full_documents was provided
-                    current_valid_full_documents.append(batch_full_documents[idx])
-            else:
-                print(f"Skipping document with empty content: URL {batch_urls[idx]}, Chunk {batch_chunk_numbers[idx]}")
-        
-        if not current_valid_contents:
-            # print(f"Batch {i//current_batch_size + 1} has no valid content after filtering. Skipping.")
-            continue # Skip to next batch if all content was empty
-
-        # Generate contextual embeddings if LLM is enabled and full_documents are available
-        contextual_contents = []
-        if settings.LLM_ENABLED and full_documents:
-            for idx in range(len(current_valid_contents)):
-                full_doc_text = current_valid_full_documents[idx]
-                chunk_text = current_valid_contents[idx]
-                if full_doc_text: # Ensure full_doc_text is not None
-                    contextual_text, _ = generate_contextual_embedding(full_doc_text, chunk_text)
-                    contextual_contents.append(contextual_text)
-                else: # Fallback if full_doc_text is None for some reason
-                    contextual_contents.append(chunk_text)
-        else: # If LLM not enabled or no full_documents, use original content
-            contextual_contents = current_valid_contents
+    batch_size = settings.BATCH_SIZE
+    for batch_start in range(0, len(embed_texts), batch_size):
+        batch_end = batch_start + batch_size
+        b_texts = embed_texts[batch_start:batch_end]
+        b_urls = v_urls[batch_start:batch_end]
+        b_metas = v_metas[batch_start:batch_end]
+        b_chunks = v_chunks[batch_start:batch_end]
 
         try:
-            batch_embeddings = create_embeddings_batch(contextual_contents)
-        except OllamaError as e:
-            print(f"Error creating embeddings for batch {i//current_batch_size + 1}: {e}. Skipping this batch.")
+            embeddings = await create_embeddings_batch(b_texts)
+        except EmbeddingError as exc:
+            logger.error(f"Skipping batch due to embedding error: {exc}")
             continue
 
-        if len(batch_embeddings) != len(contextual_contents):
-             print(f"Critical Error: Embedding count mismatch. Expected {len(contextual_contents)}, got {len(batch_embeddings)}. Skipping batch.")
-             continue
-
-        batch_data = []
-        for j in range(len(contextual_contents)):
-            chunk_size_val = len(contextual_contents[j])
-            metadata_with_chunk_size = {
-                "chunk_size": chunk_size_val,
-                **current_valid_page_metadatas[j]
-            }
-            page = CrawledPage(
-                url=current_valid_urls[j],
-                chunk_number=current_valid_chunk_numbers[j],
-                content=contextual_contents[j],
-                page_metadata=metadata_with_chunk_size,
-                embedding=batch_embeddings[j]
+        rows = []
+        for i, emb in enumerate(embeddings):
+            source_str = b_metas[i].get("source", "")
+            source_id = upsert_source(session, source_str) if source_str else None
+            meta_with_size = {"chunk_size": len(b_texts[i]), **b_metas[i]}
+            rows.append(
+                CrawledPage(
+                    source_id=source_id,
+                    url=b_urls[i],
+                    chunk_number=b_chunks[i],
+                    content=b_texts[i],
+                    page_metadata=meta_with_size,
+                    embedding=emb,
+                )
             )
-            batch_data.append(page)
+        try:
+            session.add_all(rows)
+            session.commit()
+            total_added += len(rows)
+        except SQLAlchemyError as exc:
+            logger.error(f"DB insert failed for batch: {exc}")
+            session.rollback()
 
-        if batch_data:
-            try:
-                session.add_all(batch_data)
-                session.commit()
-                total_added += len(batch_data)
-            except SQLAlchemyError as e:
-                print(f"Error inserting batch into PostgreSQL: {e}")
-                session.rollback()
-        else:
-            print(f"Skipping empty batch {i//current_batch_size + 1} (after processing).")
+    return total_added
 
-    print(f"Finished adding documents. Total added: {total_added}")
 
-def calculate_cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
-    """
-    Calculates the cosine similarity between two vectors.
-    """
+async def add_code_examples_to_db(
+    session: Session,
+    urls: List[str],
+    contents: List[str],
+    languages: List[Optional[str]],
+    summaries: List[Optional[str]],
+    metadatas: List[Dict[str, Any]],
+    chunk_numbers: List[int],
+) -> int:
+    """Embed and store code examples into code_examples table."""
+    if not urls:
+        return 0
+
+    # Delete existing
+    unique_urls = list(set(urls))
     try:
-        np_vec1 = np.array(vec1, dtype=np.float32)
-        np_vec2 = np.array(vec2, dtype=np.float32)
-        if np.all(np_vec1 == 0) or np.all(np_vec2 == 0):
-            return 0.0
-        # scipy.spatial.distance.cosine returns cosine distance (1 - similarity)
-        distance = scipy_cosine_distance(np_vec1, np_vec2)
-        return float(1 - distance)
-    except ValueError as ve: # Specifically catch ValueError (e.g., from dimension mismatch)
-        logger.error(f"ValueError calculating cosine similarity: {ve}")
-        raise # Re-raise ValueError to be caught by tests or calling code
-    except Exception as e:
-        logger.error(f"Unexpected error calculating cosine similarity: {e}")
-        return 0.0
+        to_delete = session.exec(select(CodeExample).where(CodeExample.url.in_(unique_urls))).all()
+        for row in to_delete:
+            session.delete(row)
+        if to_delete:
+            session.commit()
+    except SQLAlchemyError as exc:
+        logger.warning(f"Delete before code insert failed: {exc}")
+        session.rollback()
 
-def search_documents(
+    try:
+        embeddings = await create_embeddings_batch(contents)
+    except EmbeddingError as exc:
+        logger.error(f"Code example embedding failed: {exc}")
+        return 0
+
+    rows = []
+    for i, emb in enumerate(embeddings):
+        source_str = metadatas[i].get("source", "")
+        source_id = upsert_source(session, source_str) if source_str else None
+        rows.append(
+            CodeExample(
+                source_id=source_id,
+                url=urls[i],
+                chunk_number=chunk_numbers[i],
+                language=languages[i],
+                content=contents[i],
+                summary=summaries[i],
+                ex_metadata=metadatas[i],
+                embedding=emb,
+            )
+        )
+    try:
+        session.add_all(rows)
+        session.commit()
+        return len(rows)
+    except SQLAlchemyError as exc:
+        logger.error(f"Code example DB insert failed: {exc}")
+        session.rollback()
+        return 0
+
+
+# ---------------------------------------------------------------------------
+# Search
+# ---------------------------------------------------------------------------
+async def search_documents(
     session: Session,
     query: str,
     match_count: int = 10,
-    filter_metadata: Optional[Dict[str, Any]] = None
+    filter_metadata: Optional[Dict[str, Any]] = None,
+    use_hybrid: Optional[bool] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Search for documents by retrieving all pages and computing cosine similarity in Python.
-    This implementation is fully Python-based for testability.
+    Search crawled_pages using vector similarity, optionally fused with FTS.
     """
     if not query or not query.strip():
-        logger.warning("Search query is empty.")
+        logger.warning("Empty search query.")
         return []
+
+    hybrid = settings.USE_HYBRID_SEARCH if use_hybrid is None else use_hybrid
 
     try:
-        query_embedding = create_embedding(query) # Uses default requests.post
-    except OllamaError as e:
-        logger.error(f"Failed to create embedding for query '{query}': {e}")
+        query_embedding = await create_embedding(query)
+    except EmbeddingError as exc:
+        logger.error(f"Failed to embed query: {exc}")
         return []
 
+    # Build filter JSON for the DB function
+    filter_json = json.dumps(filter_metadata or {})
+
+    # Use the SQL function for vector search
     try:
-        pages_query = select(CrawledPage)
-        # The filter_metadata part needs to be adapted if we want to filter at DB level with SQLModel
-        # For now, fetching all and filtering in Python for simplicity with current structure.
-        pages = session.exec(pages_query).all()
-    except Exception as e:
-        logger.error(f"Failed to retrieve pages: {e}")
-        return []
+        raw = session.exec(
+            text(
+                "SELECT id, url, chunk_number, content, metadata, similarity "
+                "FROM match_crawled_pages(CAST(:emb AS vector), :cnt, CAST(:filt AS jsonb))"
+            ).bindparams(
+                emb=str(query_embedding),
+                cnt=match_count * 2 if hybrid else match_count,
+                filt=filter_json,
+            )
+        ).all()
+    except Exception:
+        # Fall back to Python-side similarity if DB function not available
+        raw = _python_side_vector_search(session, query_embedding, match_count * 2, filter_metadata)
 
-    # Apply metadata filter in Python if provided
+    vector_results = [
+        {
+            "id": r[0],
+            "url": r[1],
+            "chunk_number": r[2],
+            "content": r[3],
+            "page_metadata": r[4] if isinstance(r[4], dict) else {},
+            "similarity_score": float(r[5]),
+            "fts_score": 0.0,
+        }
+        for r in raw
+    ]
+
+    if not hybrid:
+        return vector_results[:match_count]
+
+    # FTS pass
+    try:
+        fts_raw = session.exec(
+            text(
+                "SELECT id, url, chunk_number, content, metadata, "
+                "ts_rank(fts, plainto_tsquery('english', :q)) AS rank "
+                "FROM crawled_pages "
+                "WHERE fts @@ plainto_tsquery('english', :q) "
+                "AND CAST(:filt AS jsonb) <@ metadata "
+                "ORDER BY rank DESC LIMIT :cnt"
+            ).bindparams(q=query, filt=filter_json, cnt=match_count * 2)
+        ).all()
+    except Exception:
+        fts_raw = []
+
+    fts_map = {
+        r[0]: float(r[5]) for r in fts_raw
+    }
+
+    # Reciprocal rank fusion
+    vector_rank = {r["id"]: i + 1 for i, r in enumerate(vector_results)}
+    fts_ids_ordered = [r[0] for r in fts_raw]
+    fts_rank = {rid: i + 1 for i, rid in enumerate(fts_ids_ordered)}
+
+    k = 60
+    all_ids = set(vector_rank) | set(fts_rank)
+    rrf_scores = {
+        rid: 1 / (k + vector_rank.get(rid, len(all_ids) + k))
+             + 1 / (k + fts_rank.get(rid, len(all_ids) + k))
+        for rid in all_ids
+    }
+
+    # Merge results
+    id_to_result: Dict[int, Dict[str, Any]] = {r["id"]: r for r in vector_results}
+    for r in fts_raw:
+        if r[0] not in id_to_result:
+            id_to_result[r[0]] = {
+                "id": r[0],
+                "url": r[1],
+                "chunk_number": r[2],
+                "content": r[3],
+                "page_metadata": r[4] if isinstance(r[4], dict) else {},
+                "similarity_score": 0.0,
+                "fts_score": fts_map.get(r[0], 0.0),
+            }
+
+    merged = sorted(id_to_result.values(), key=lambda x: rrf_scores.get(x["id"], 0), reverse=True)
+    return merged[:match_count]
+
+
+def _python_side_vector_search(
+    session: Session,
+    query_embedding: List[float],
+    limit: int,
+    filter_metadata: Optional[Dict[str, Any]],
+) -> List[Any]:
+    """Fallback: compute cosine similarity in Python."""
+    q = np.array(query_embedding, dtype=np.float32)
+    pages = session.exec(select(CrawledPage)).all()
+
     if filter_metadata:
-        filtered_pages = []
-        for p in pages:
-            # Ensure page_metadata is a dict, handle if it's None or other types
-            current_page_metadata = p.page_metadata if isinstance(p.page_metadata, dict) else {}
-            match = True
-            for k, v in filter_metadata.items():
-                if current_page_metadata.get(k) != v:
-                    match = False
-                    break
-            if match:
-                filtered_pages.append(p)
-        pages = filtered_pages
+        pages = [
+            p for p in pages
+            if all(
+                (p.page_metadata if isinstance(p.page_metadata, dict) else {}).get(k) == v
+                for k, v in filter_metadata.items()
+            )
+        ]
 
-    results = []
+    scored = []
     for p in pages:
-        try:
-            # Ensure p.embedding is valid before calculating similarity
-            if not p.embedding or not isinstance(p.embedding, list) or not all(isinstance(x, (int, float)) for x in p.embedding):
-                logger.warning(f"Skipping document ID {p.id} due to invalid or missing embedding.")
-                continue
-            
-            sim_score = calculate_cosine_similarity(query_embedding, p.embedding)
-        except Exception as e:
-            logger.error(f"Error computing similarity for document ID {p.id}: {e}")
-            continue # Skip this document if similarity calculation fails
+        if not p.embedding:
+            continue
+        arr = np.array(p.embedding, dtype=np.float32)
+        norm_q = np.linalg.norm(q)
+        norm_a = np.linalg.norm(arr)
+        if norm_q == 0 or norm_a == 0:
+            sim = 0.0
+        else:
+            sim = float(np.dot(q, arr) / (norm_q * norm_a))
+        scored.append((p.id, p.url, p.chunk_number, p.content, p.page_metadata, sim))
 
-        results.append({
-            "id": p.id,
-            "url": p.url,
-            "chunk_number": p.chunk_number,
-            "content": p.content,
-            "page_metadata": p.page_metadata if isinstance(p.page_metadata, dict) else {},
-            "similarity_score": sim_score
-        })
+    scored.sort(key=lambda x: x[5], reverse=True)
+    return scored[:limit]
 
-    results.sort(key=lambda x: x["similarity_score"], reverse=True)
-    logger.debug(f"Search for '{query}' found {len(results)} potential matches, returning top {match_count}.")
-    return results[:match_count]
 
-# Example of how to run table creation (e.g., in a startup script)
-# if __name__ == "__main__":
-#     print("Creating database tables...")
-#     create_db_and_tables()
-#     print("Database tables created (if they didn't exist).")
+async def search_code_examples(
+    session: Session,
+    query: str,
+    match_count: int = 5,
+    language: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Search code_examples by vector similarity."""
+    if not query or not query.strip():
+        return []
+
+    try:
+        query_embedding = await create_embedding(query)
+    except EmbeddingError as exc:
+        logger.error(f"Failed to embed code query: {exc}")
+        return []
+
+    filter_dict: Dict[str, Any] = {}
+    if language:
+        filter_dict["language"] = language
+    filter_json = json.dumps(filter_dict)
+
+    try:
+        raw = session.exec(
+            text(
+                "SELECT id, url, chunk_number, language, content, summary, metadata, similarity "
+                "FROM match_code_examples(CAST(:emb AS vector), :cnt, CAST(:filt AS jsonb))"
+            ).bindparams(emb=str(query_embedding), cnt=match_count, filt=filter_json)
+        ).all()
+    except Exception:
+        raw = []
+
+    return [
+        {
+            "id": r[0],
+            "url": r[1],
+            "chunk_number": r[2],
+            "language": r[3],
+            "content": r[4],
+            "summary": r[5],
+            "metadata": r[6] if isinstance(r[6], dict) else {},
+            "similarity_score": float(r[7]),
+        }
+        for r in raw
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Reranking
+# ---------------------------------------------------------------------------
+def rerank_results(
+    query: str,
+    results: List[Dict[str, Any]],
+    top_k: int = 5,
+) -> List[Dict[str, Any]]:
+    """
+    Rerank results using a cross-encoder model.
+    Falls back to original order if sentence_transformers unavailable.
+    """
+    if not settings.USE_RERANKING or not results:
+        return results[:top_k]
+
+    try:
+        from sentence_transformers import CrossEncoder  # noqa: PLC0415
+        model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        pairs = [(query, r["content"]) for r in results]
+        scores = model.predict(pairs)
+        for i, r in enumerate(results):
+            r["rerank_score"] = float(scores[i])
+        return sorted(results, key=lambda x: x.get("rerank_score", 0), reverse=True)[:top_k]
+    except Exception as exc:
+        logger.warning(f"Reranking failed, returning original order: {exc}")
+        return results[:top_k]
+
+
+# ---------------------------------------------------------------------------
+# Code example extraction helper
+# ---------------------------------------------------------------------------
+def extract_code_blocks(markdown: str) -> List[Dict[str, str]]:
+    """
+    Extract fenced code blocks from markdown text.
+    Returns list of {language, content} dicts.
+    """
+    import re
+    pattern = re.compile(r"```(\w*)\n(.*?)```", re.DOTALL)
+    blocks = []
+    for match in pattern.finditer(markdown):
+        lang = match.group(1).strip() or None
+        code = match.group(2).strip()
+        if code:
+            blocks.append({"language": lang, "content": code})
+    return blocks

@@ -11,3 +11,7 @@ logs/
 *.log
 PLANNING.md
 TASK.md
+# Docker-created local directories
+ollama/
+.temp/
+.temp/

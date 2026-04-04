@@ -1,37 +1,50 @@
 [project]
 name = "crawl4ai-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP server for integrating web crawling and RAG into AI agents and AI coding assistants"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
-    "crawl4ai==0.6.2",
-    "mcp==1.7.1",
-    "sqlmodel>=0.0.14",      # Using SQLModel for ORM
-    "psycopg2-binary>=2.9.9", # PostgreSQL driver
-    "pgvector>=0.2.0",       # pgvector support for SQLAlchemy/SQLModel
-    "dotenv==0.9.9",
-    "requests>=2.20.0",      # Added for Ollama API calls
-    "scipy>=1.10.0",
+    "crawl4ai>=0.8.6",
+    "fastmcp>=2.0.0",
+    "sqlmodel>=0.0.14",
+    "psycopg2-binary>=2.9.9",
+    "pgvector>=0.2.0",
+    "python-dotenv>=1.0.0",
     "pydantic-settings>=2.0.0",
     "httpx>=0.27.0",
-    "openai==1.71.0",         # For contextual embedding generation (specific version)
-    "alembic==1.15.2" # Added for database migrations
+    "openai>=1.71.0",
+    "numpy>=1.26.0",
+    "nltk>=3.8.0",
+    "sentence-transformers>=3.0.0",
 ]
 
 [project.optional-dependencies]
 test = [
     "pytest>=7.0.0",
     "pytest-mock>=3.0.0",
-    "pytest-asyncio>=0.20.0"
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.0.0",
 ]
 
 [tool.pytest.ini_options]
-addopts = "-p pytest_asyncio"
+asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-pythonpath = [
-  "."
-]
+pythonpath = ["."]
 markers = [
-    "asyncio: mark async tests to be run with asyncio"
-  ]
+    "unit: fast, offline tests using mocks",
+    "integration: tests requiring live services",
+]
+addopts = "-m 'not integration'"
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "src/__init__.py",
+    "src/crawl4ai_mcp.py",
+    "src/reembed_documents.py",
+]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true

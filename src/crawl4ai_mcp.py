@@ -1,146 +1,104 @@
 """
 MCP server for web crawling with Crawl4AI.
 
-This server provides tools to crawl websites using Crawl4AI, automatically detecting
-the appropriate crawl method based on URL type (sitemap, txt file, or regular webpage).
+Provides tools to crawl websites, store content using pgvector, and perform
+RAG queries. Uses FastMCP 3.2.0 with async lifespan.
 """
 import sys
 import os
-from pathlib import Path
-
-# Add project root to Python path to make 'src' importable
-project_root = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(project_root))
-
-from mcp.server.fastmcp import FastMCP, Context
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from pathlib import Path
 from dotenv import load_dotenv
-import asyncio
-import logging
 
+from fastmcp import FastMCP, Context
 from crawl4ai import AsyncWebCrawler, BrowserConfig
-# Updated imports for PostgreSQL/SQLModel functions and new crawler modules
-from src.utils import (
-    get_session,
-    create_db_and_tables,
-    engine,
-    create_embedding, # For health check
-    settings, # Import settings object
-    OllamaError # For health check
-)
-from sqlmodel import select # For DB health check
 
-# Import tool functions from the new module
-from src.crawler import tool_definitions
+from src.utils import get_session, engine, settings
+from sqlmodel import text
+from sqlalchemy.orm import Session
 
-# Load environment variables from the project root .env file
-dotenv_path = project_root / '.env'
+# Load .env from project root before any settings are imported
+project_root = Path(__file__).resolve().parent.parent
+load_dotenv(project_root / ".env", override=True)
 
-# Force override of existing environment variables
-load_dotenv(dotenv_path, override=True)
-
-# Configure logging
-log_level_name = os.getenv('LOG_LEVEL', 'INFO').upper() # Default to INFO if not set
-log_level = getattr(logging, log_level_name, logging.INFO) # Get the logging constant
-
-# Ensure that if an invalid level name is given, it defaults to INFO
-if not isinstance(log_level, int):
-    print(f"Warning: Invalid LOG_LEVEL '{log_level_name}'. Defaulting to INFO.")
-    log_level = logging.INFO
-
-logging.basicConfig(level=log_level, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+log_level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+log_level = getattr(logging, log_level_name, logging.INFO)
+logging.basicConfig(level=log_level, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Create a dataclass for our application context
+
 @dataclass
-class Crawl4AIContext:
-    """Context for the Crawl4AI MCP server."""
+class AppContext:
     crawler: AsyncWebCrawler
 
+
 @asynccontextmanager
-async def crawl4ai_lifespan(server: FastMCP) -> AsyncIterator[Crawl4AIContext]:
-    """
-    Manages the Crawl4AI client lifecycle and performs initial checks.
-    """
-    # Create browser configuration
-    browser_config = BrowserConfig(
-        headless=True,
-        verbose=False # Set to True for more detailed browser logs from Crawl4AI
-    )
-    
-    # Initialize the crawler
-    logger.info("Initializing AsyncWebCrawler...")
+async def lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
+    """Start crawler and verify DB connection, then yield context."""
+    browser_config = BrowserConfig(headless=True, verbose=False)
+    logger.info("Starting AsyncWebCrawler...")
     crawler = AsyncWebCrawler(config=browser_config)
     await crawler.__aenter__()
-    logger.info("AsyncWebCrawler initialized.")
-    # server.state.crawler = crawler # Removed: FastMCP doesn't use .state like FastAPI app
-    
-    # Ensure engine is available and connection possible
-    logger.info("Performing DB connection check...")
+    logger.info("AsyncWebCrawler ready.")
+
+    logger.info("Checking DB connection...")
     try:
-        # Try getting a session to ensure the engine/connection works
         with next(get_session()) as session:
-             session.exec(select(1)).first() # Simple query
-        logger.info("DB connection check successful.")
-    except Exception as db_error:
-        logger.error(f"Critical: DB connection check failed: {db_error}", exc_info=True)
-        raise db_error # Fail fast if DB connection fails
-
-    # Removed Ollama health check for faster startup during debugging
-
-    try:
-        logger.info("Yielding Crawl4AIContext...")
-        yield Crawl4AIContext(crawler=crawler)
-        logger.info("Crawl4AIContext yielded.") # We hope to see this now
-    finally:
-        # The 'crawler' variable is local to this lifespan function
-        logger.info("Cleaning up AsyncWebCrawler...")
+            session.exec(text("SELECT 1")).first()
+        logger.info("DB connection OK.")
+    except Exception as exc:
+        logger.error(f"DB connection failed: {exc}")
         await crawler.__aexit__(None, None, None)
-        logger.info("AsyncWebCrawler cleaned up.")
-
-# Initialize FastMCP server
-# Temporary monkeypatch: ignore the `Received request before initialization was complete` race
-from mcp.server.session import ServerSession
-
-_old_received_request = ServerSession._received_request
-
-async def _received_request(self, *args, **kwargs):
-    try:
-        return await _old_received_request(self, *args, **kwargs)
-    except RuntimeError as e:
-        if "Received request before initialization was complete" in str(e):
-            logger.warning(f"Ignored expected RuntimeError during initialization race: {e}")
-            return None
         raise
 
-ServerSession._received_request = _received_request
+    try:
+        yield AppContext(crawler=crawler)
+    finally:
+        logger.info("Shutting down AsyncWebCrawler...")
+        await crawler.__aexit__(None, None, None)
 
+
+# ---------------------------------------------------------------------------
+# Create server
+# ---------------------------------------------------------------------------
 mcp = FastMCP(
     "mcp-docs-rag",
-    description="MCP server for RAG and web crawling with Crawl4AI",
-    lifespan=crawl4ai_lifespan,
-    host=os.getenv("HOST", "0.0.0.0"),
-    port=int(os.getenv("PORT", "8051")),
-    settings={"initialization_timeout": 10.0} # Added initialization_timeout
+    instructions="Web crawling and RAG server built on Crawl4AI and pgvector.",
+    lifespan=lifespan,
 )
 
-# Register tools from the tool_definitions module
+
+# ---------------------------------------------------------------------------
+# Register tools
+# ---------------------------------------------------------------------------
+from src.crawler import tool_definitions  # noqa: E402
+
 mcp.tool()(tool_definitions.crawl_single_page)
 mcp.tool()(tool_definitions.smart_crawl_url)
 mcp.tool()(tool_definitions.get_available_sources)
 mcp.tool()(tool_definitions.perform_rag_query)
 
+if settings.USE_AGENTIC_RAG:
+    mcp.tool()(tool_definitions.search_code_examples)
 
-async def main():
-    """Main function to run the MCP server."""
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+async def main() -> None:
     transport = os.getenv("TRANSPORT", "sse")
-    logger.info(f"Starting MCP server with {transport.upper()} transport...")
-    if transport == 'sse':
-        await mcp.run_sse_async()
-    else:
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "8051"))
+    logger.info(f"Starting MCP server [{transport}] on {host}:{port}")
+    if transport == "stdio":
         await mcp.run_stdio_async()
+    else:
+        await mcp.run_http_async(transport="sse", host=host, port=port)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -1,29 +1,92 @@
 services:
+  # -----------------------------------------------------------------------
+  # Mode A (default): bundled pgvector — good for local dev/testing
+  # Start: docker compose up
+  # -----------------------------------------------------------------------
   docs-rag-mcp:
     build: .
     container_name: docs-rag-mcp
     ports:
-      - "8051:8051"
+      - "${PORT:-8051}:${PORT:-8051}"
     env_file:
-      - .env # Load environment variables from .env file
+      - .env
+    environment:
+      - POSTGRES_URL=postgresql://${POSTGRES_USER:-raguser}:${POSTGRES_PASSWORD:-ragpassword}@rag-db:5432/${POSTGRES_DB:-ragdb}
+      - OLLAMA_API_URL=http://ollama:11434/api/embeddings
     depends_on:
-      - rag-db
+      rag-db:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:${PORT:-8051}/sse')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     networks:
       - backend
 
   rag-db:
     container_name: rag-db
-    image: pgvector/pgvector:pg17 # Use official pgvector image based on PostgreSQL 17
+    image: pgvector/pgvector:pg17
     env_file:
-      - .env # Load environment variables from .env file
+      - .env
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-raguser}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-ragpassword}
+      - POSTGRES_DB=${POSTGRES_DB:-ragdb}
     volumes:
-      - postgres_data:/var/lib/postgresql/data # Persist data in a named volume
-      - ./initdb:/docker-entrypoint-initdb.d # Mount init scripts directory
+      - postgres_data:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d
     ports:
-      - "5434:5432" # Map host port 5434 to container port 5432 (optional, for external access)
-    shm_size: 1g # Recommended shared memory size for HNSW index builds
+      - "5434:5432"
+    shm_size: 1g
     restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-raguser} -d ${POSTGRES_DB:-ragdb}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - backend
+
+  # -----------------------------------------------------------------------
+  # Mode B: external DB — use with: docker compose --profile external up
+  # Set POSTGRES_URL in .env to point to your external PostgreSQL
+  # -----------------------------------------------------------------------
+  docs-rag-mcp-ext:
+    build: .
+    container_name: docs-rag-mcp-ext
+    profiles:
+      - external
+    ports:
+      - "${PORT:-8051}:${PORT:-8051}"
+    env_file:
+      - .env
+    restart: unless-stopped
+    networks:
+      - backend
+
+  # -----------------------------------------------------------------------
+  # Ollama: local embedding model server
+  # First run pulls nomic-embed-text (~274 MB); subsequent runs use cache.
+  # -----------------------------------------------------------------------
+  ollama:
+    container_name: ollama
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list | grep -q nomic-embed-text || (ollama pull nomic-embed-text && ollama list | grep -q nomic-embed-text)"]
+      interval: 30s
+      timeout: 120s
+      retries: 5
+      start_period: 30s
     networks:
       - backend
 
@@ -33,3 +96,4 @@ networks:
 
 volumes:
   postgres_data:
+  ollama_data:

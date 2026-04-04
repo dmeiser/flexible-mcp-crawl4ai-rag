@@ -1,0 +1,172 @@
+-- Idempotent database setup script for crawl4ai-mcp
+-- Uses :embedding_dim placeholder replaced by envsubst at init time
+
+-- Enable required extensions
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+-- -----------------------------------------------------------------------
+-- sources table: one row per crawled domain/source
+-- -----------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS sources (
+    id         BIGSERIAL PRIMARY KEY,
+    source     TEXT NOT NULL UNIQUE,
+    summary    TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- -----------------------------------------------------------------------
+-- crawled_pages table
+-- -----------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS crawled_pages (
+    id            BIGSERIAL PRIMARY KEY,
+    source_id     BIGINT REFERENCES sources(id) ON DELETE SET NULL,
+    url           TEXT NOT NULL,
+    chunk_number  INTEGER NOT NULL,
+    content       TEXT NOT NULL,
+    metadata      JSONB NOT NULL DEFAULT '{}'::jsonb,
+    embedding     VECTOR(:embedding_dim),
+    fts           TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (url, chunk_number)
+);
+
+-- -----------------------------------------------------------------------
+-- code_examples table
+-- -----------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS code_examples (
+    id            BIGSERIAL PRIMARY KEY,
+    source_id     BIGINT REFERENCES sources(id) ON DELETE SET NULL,
+    url           TEXT NOT NULL,
+    chunk_number  INTEGER NOT NULL,
+    language      TEXT,
+    content       TEXT NOT NULL,
+    summary       TEXT,
+    metadata      JSONB NOT NULL DEFAULT '{}'::jsonb,
+    embedding     VECTOR(:embedding_dim),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (url, chunk_number)
+);
+
+-- -----------------------------------------------------------------------
+-- Indexes
+-- -----------------------------------------------------------------------
+CREATE INDEX IF NOT EXISTS idx_crawled_pages_embedding
+    ON crawled_pages USING ivfflat (embedding vector_cosine_ops)
+    WITH (lists = 100);
+
+CREATE INDEX IF NOT EXISTS idx_crawled_pages_metadata
+    ON crawled_pages USING gin (metadata);
+
+CREATE INDEX IF NOT EXISTS idx_crawled_pages_source
+    ON crawled_pages ((metadata->>'source'));
+
+CREATE INDEX IF NOT EXISTS idx_crawled_pages_fts
+    ON crawled_pages USING gin (fts);
+
+CREATE INDEX IF NOT EXISTS idx_code_examples_embedding
+    ON code_examples USING ivfflat (embedding vector_cosine_ops)
+    WITH (lists = 100);
+
+CREATE INDEX IF NOT EXISTS idx_code_examples_metadata
+    ON code_examples USING gin (metadata);
+
+-- -----------------------------------------------------------------------
+-- match_crawled_pages: vector similarity search
+-- -----------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION match_crawled_pages(
+    query_embedding VECTOR(:embedding_dim),
+    match_count     INT DEFAULT 10,
+    filter          JSONB DEFAULT '{}'::jsonb
+) RETURNS TABLE (
+    id           BIGINT,
+    url          TEXT,
+    chunk_number INTEGER,
+    content      TEXT,
+    metadata     JSONB,
+    similarity   FLOAT
+)
+LANGUAGE plpgsql AS $$
+#variable_conflict use_column
+BEGIN
+    SET LOCAL ivfflat.probes = 10;
+    RETURN QUERY
+    SELECT
+        cp.id::BIGINT,
+        cp.url,
+        cp.chunk_number,
+        cp.content,
+        cp.metadata,
+        1 - (cp.embedding <=> query_embedding) AS similarity
+    FROM crawled_pages cp
+    WHERE cp.metadata @> filter
+    ORDER BY cp.embedding <=> query_embedding
+    LIMIT match_count;
+END;
+$$;
+
+-- -----------------------------------------------------------------------
+-- match_code_examples: vector similarity search for code
+-- -----------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION match_code_examples(
+    query_embedding VECTOR(:embedding_dim),
+    match_count     INT DEFAULT 10,
+    filter          JSONB DEFAULT '{}'::jsonb
+) RETURNS TABLE (
+    id           BIGINT,
+    url          TEXT,
+    chunk_number INTEGER,
+    language     TEXT,
+    content      TEXT,
+    summary      TEXT,
+    metadata     JSONB,
+    similarity   FLOAT
+)
+LANGUAGE plpgsql AS $$
+#variable_conflict use_column
+BEGIN
+    SET LOCAL ivfflat.probes = 10;
+    RETURN QUERY
+    SELECT
+        ce.id::BIGINT,
+        ce.url,
+        ce.chunk_number,
+        ce.language,
+        ce.content,
+        ce.summary,
+        ce.metadata,
+        1 - (ce.embedding <=> query_embedding) AS similarity
+    FROM code_examples ce
+    WHERE ce.metadata @> filter
+    ORDER BY ce.embedding <=> query_embedding
+    LIMIT match_count;
+END;
+$$;
+
+-- -----------------------------------------------------------------------
+-- RLS policies
+-- -----------------------------------------------------------------------
+ALTER TABLE sources ENABLE ROW LEVEL SECURITY;
+ALTER TABLE crawled_pages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE code_examples ENABLE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies WHERE tablename = 'crawled_pages' AND policyname = 'allow_public_read'
+    ) THEN
+        CREATE POLICY allow_public_read ON crawled_pages FOR SELECT TO PUBLIC USING (true);
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies WHERE tablename = 'code_examples' AND policyname = 'allow_public_read'
+    ) THEN
+        CREATE POLICY allow_public_read ON code_examples FOR SELECT TO PUBLIC USING (true);
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies WHERE tablename = 'sources' AND policyname = 'allow_public_read'
+    ) THEN
+        CREATE POLICY allow_public_read ON sources FOR SELECT TO PUBLIC USING (true);
+    END IF;
+END;
+$$;
