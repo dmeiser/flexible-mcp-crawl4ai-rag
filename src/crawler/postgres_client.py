@@ -1,5 +1,6 @@
 """PostgreSQL client — document storage and retrieval operations."""
 import logging
+import hashlib
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse
 from datetime import datetime, timezone
@@ -53,6 +54,10 @@ async def store_crawled_documents(
                 "source": urlparse(source_url).netloc,
                 "crawl_type": crawl_type,
                 "crawl_time": datetime.now(timezone.utc).isoformat(),
+                "crawl_timestamp": datetime.now(timezone.utc).isoformat(),
+                "content_class": "text",
+                "is_active": True,
+                "content_hash": hashlib.sha256(chunk.encode("utf-8")).hexdigest(),
             })
             all_urls.append(source_url)
             all_contents.append(chunk)

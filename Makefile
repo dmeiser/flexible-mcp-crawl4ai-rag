@@ -9,7 +9,7 @@
 #   make test-integration — run smoke tests against the live Docker stack
 #   make clean           — stop stack and remove volumes
 
-.PHONY: test lint build up down logs test-integration clean help
+.PHONY: test test-fast lint build up down logs test-integration verify-e2e clean help
 
 IMAGE_NAME   ?= crawl4ai-mcp
 COMPOSE_FILE ?= docker-compose.yml
@@ -69,6 +69,13 @@ clean:
 test-integration: _check-stack-up
 	MCP_URL=http://localhost:$(PORT)/sse uv run python tests/integration_smoke.py
 
+# Full local verification flow requested for this project:
+# 1) unit tests with 100% coverage gate
+# 2) docker image build
+# 3) bring up compose environment
+# 4) run integration smoke tests against live stack
+verify-e2e: test build up test-integration
+
 _check-stack-up:
 	@docker compose -f $(COMPOSE_FILE) ps --status=running 2>/dev/null | grep -q "$(APP_SERVICE)" || \
 	    (echo "ERROR: stack not running — run 'make up' first" && exit 1)
@@ -84,4 +91,5 @@ help:
 	@echo "  down              Stop stack"
 	@echo "  logs              Tail app container logs"
 	@echo "  test-integration  Smoke-test the running stack"
+	@echo "  verify-e2e        Run test + build + up + integration smoke"
 	@echo "  clean             Stop stack and remove volumes"

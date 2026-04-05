@@ -6,7 +6,10 @@ import asyncio
 import logging
 import os
 import json
+import hashlib
+import math
 from enum import Enum
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Generator, Tuple
 
 import httpx
@@ -48,6 +51,14 @@ class ChunkStrategy(str, Enum):
 class EmbeddingProvider(str, Enum):
     OPENAI = "openai"
     OLLAMA = "ollama"
+
+
+class ContentClass(str, Enum):
+    TEXT = "text"
+    CODE = "code"
+    STRUCTURED = "structured"
+    MARKDOWN_RAW = "markdown_raw"
+    MARKDOWN_FIT = "markdown_fit"
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +136,24 @@ class CrawledPage(SQLModel, table=True):
     url: str = Field(index=True)
     chunk_number: int
     content: str
+    content_class: str = Field(default=ContentClass.TEXT.value, index=True)
+    is_active: bool = Field(default=True, index=True)
+    crawl_timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    content_hash: Optional[str] = Field(default=None, index=True)
+    # Phase 9.5 - freshness lifecycle
+    first_seen_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_seen_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_crawled_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    expires_at: Optional[datetime] = Field(default=None)
+    is_pinned: bool = Field(default=False, index=True)
+    tombstoned_at: Optional[datetime] = Field(default=None, index=True)
+    staleness_score: float = Field(default=0.0)
+    # Phase 9.6 - value scoring and hit tracking
+    value_score: float = Field(default=0.0)
+    last_hit_at: Optional[datetime] = Field(default=None)
+    hit_count: int = Field(default=0)
     page_metadata: Dict[str, Any] = Field(default={}, sa_column=Column("metadata", JSONB))
+    retrieval_metadata: Dict[str, Any] = Field(default={}, sa_column=Column("retrieval_metadata", JSONB))
     embedding: List[float] = Field(sa_column=Column(Vector(settings.EMBEDDING_DIM)))
 
 
@@ -138,8 +166,62 @@ class CodeExample(SQLModel, table=True):
     language: Optional[str] = None
     content: str
     summary: Optional[str] = None
+    content_class: str = Field(default=ContentClass.CODE.value, index=True)
+    is_active: bool = Field(default=True, index=True)
+    crawl_timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    content_hash: Optional[str] = Field(default=None, index=True)
+    # Phase 9.5 - freshness lifecycle
+    first_seen_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_seen_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_crawled_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    expires_at: Optional[datetime] = Field(default=None)
+    is_pinned: bool = Field(default=False, index=True)
+    tombstoned_at: Optional[datetime] = Field(default=None, index=True)
+    staleness_score: float = Field(default=0.0)
+    # Phase 9.6 - value scoring and hit tracking
+    value_score: float = Field(default=0.0)
+    last_hit_at: Optional[datetime] = Field(default=None)
+    hit_count: int = Field(default=0)
     ex_metadata: Dict[str, Any] = Field(default={}, sa_column=Column("metadata", JSONB))
     embedding: List[float] = Field(sa_column=Column(Vector(settings.EMBEDDING_DIM)))
+
+
+class SourcePolicy(SQLModel, table=True):
+    """Per-source freshness and eviction configuration."""
+    __tablename__ = "source_policies"
+    source: str = Field(primary_key=True)
+    ttl_days: int = Field(default=90)
+    recrawl_interval_hours: int = Field(default=168)
+    priority_weight: float = Field(default=1.0)
+    min_active_docs: int = Field(default=20)
+    max_source_size_mb: Optional[int] = Field(default=None)
+
+
+class StoragePolicy(SQLModel, table=True):
+    """Global storage budget configuration (single-row table)."""
+    __tablename__ = "storage_policies"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    is_singleton: bool = Field(default=True)
+    max_db_size_gb: float = Field(default=10.0)
+    warn_threshold: float = Field(default=0.80)
+    high_threshold: float = Field(default=0.90)
+    hard_threshold: float = Field(default=1.00)
+    target_post_evict_ratio: float = Field(default=0.75)
+    tombstone_grace_hours: int = Field(default=24)
+
+
+class EvictionAuditLog(SQLModel, table=True):
+    """Audit log of tombstoning and eviction actions."""
+    __tablename__ = "eviction_audit_log"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    table_name: str
+    record_id: int
+    source: Optional[str] = None
+    evicted_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    reason: str
+    value_score: float = Field(default=0.0)
+    staleness_score: float = Field(default=0.0)
+    was_pinned: bool = Field(default=False)
 
 
 class Source(SQLModel, table=True):
@@ -152,6 +234,118 @@ class Source(SQLModel, table=True):
 def get_session() -> Generator[Session, None, None]:
     with Session(engine) as session:
         yield session
+
+
+# ---------------------------------------------------------------------------
+# Phase 9.5/9.6 — scoring, staleness, tombstoning
+# ---------------------------------------------------------------------------
+
+def compute_staleness_score(age_days: float, half_life_days: float = 90.0) -> float:
+    """Exponential staleness decay.  Returns 0.0 (fresh) → ~1.0 (stale)."""
+    return 1.0 - math.exp(-age_days / max(half_life_days, 1e-9))
+
+
+def compute_value_score(
+    hit_count: int = 0,
+    content_density: float = 0.5,
+    age_days: float = 0.0,
+    near_dup_sim: float = 0.0,
+    source_priority: float = 1.0,
+    half_life_days: float = 90.0,
+    max_hit_count: float = 100.0,
+) -> float:
+    """Composite value score (0–1 * source_priority).  Higher = more valuable.
+
+    v = 0.35*utility + 0.20*quality + 0.25*freshness + 0.20*uniqueness
+    """
+    utility = min(1.0, math.log1p(hit_count) / math.log1p(max(max_hit_count, 1.0)))
+    quality = max(0.0, content_density * (1.0 - near_dup_sim))
+    freshness = math.exp(-age_days / max(half_life_days, 1e-9))
+    uniqueness = max(0.0, 1.0 - near_dup_sim)
+    raw = 0.35 * utility + 0.20 * quality + 0.25 * freshness + 0.20 * uniqueness
+    return max(0.0, min(1.0, raw * source_priority))
+
+
+def tombstone_records(
+    session: Session,
+    record_ids: List[int],
+    table_name: str = "crawled_pages",
+    reason: str = "manual",
+) -> int:
+    """Soft-delete records by setting tombstoned_at and is_active=False.
+
+    Logs each eviction to eviction_audit_log.  Returns count tombstoned.
+    """
+    if not record_ids:
+        return 0
+
+    if table_name == "crawled_pages":
+        model_cls = CrawledPage
+    elif table_name == "code_examples":
+        model_cls = CodeExample
+    else:
+        logger.warning(f"Unknown table for tombstoning: {table_name}")
+        return 0
+
+    now = datetime.now(timezone.utc)
+    count = 0
+    try:
+        records = session.exec(
+            select(model_cls).where(model_cls.id.in_(record_ids))  # type: ignore[attr-defined]
+        ).all()
+        for record in records:
+            record.tombstoned_at = now
+            record.is_active = False
+            source_str: Optional[str] = None
+            if hasattr(record, "page_metadata") and isinstance(record.page_metadata, dict):
+                source_str = record.page_metadata.get("source")
+            elif hasattr(record, "ex_metadata") and isinstance(record.ex_metadata, dict):
+                source_str = record.ex_metadata.get("source")
+            log_entry = EvictionAuditLog(
+                table_name=table_name,
+                record_id=record.id,
+                source=source_str,
+                evicted_at=now,
+                reason=reason,
+                value_score=record.value_score,
+                staleness_score=record.staleness_score,
+                was_pinned=record.is_pinned,
+            )
+            session.add(log_entry)
+            count += 1
+        session.commit()
+    except SQLAlchemyError as exc:
+        logger.error(f"Failed to tombstone records: {exc}")
+        session.rollback()
+        return 0
+
+    return count
+
+
+def _get_db_size_bytes(session: Session) -> int:
+    """Return current DB size in bytes via pg_database_size."""
+    try:
+        row = session.exec(text("SELECT pg_database_size(current_database())")).first()
+        return int(row[0]) if row else 0
+    except Exception:
+        return 0
+
+
+def _parse_iso_datetime(value: Any) -> datetime:
+    """Parse timestamp-like metadata values into timezone-aware UTC datetimes."""
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.strip())
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except ValueError:
+            pass
+    return datetime.now(timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -327,16 +521,19 @@ async def add_documents_to_db(
 
     v_urls, v_contents, v_metas, v_chunks, v_fulldocs = zip(*valid)
 
-    # Delete existing rows (upsert)
+    # Collect first_seen_at from existing rows before deletion (preserves re-index timestamps)
+    first_seen_map: Dict[Tuple[str, int], datetime] = {}
     unique_urls = list(set(v_urls))
     try:
         to_delete = session.exec(select(CrawledPage).where(CrawledPage.url.in_(unique_urls))).all()
         for row in to_delete:
+            first_seen_map[(row.url, row.chunk_number)] = row.first_seen_at
             session.delete(row)
         if to_delete:
             session.commit()
     except SQLAlchemyError as exc:
         logger.warning(f"Delete before insert failed: {exc}")
+        first_seen_map.clear()
         session.rollback()
 
     # Apply contextual enrichment if enabled
@@ -349,6 +546,7 @@ async def add_documents_to_db(
         embed_texts = list(v_contents)
 
     # Embed in batches
+    _now = datetime.now(timezone.utc)
     total_added = 0
     batch_size = settings.BATCH_SIZE
     for batch_start in range(0, len(embed_texts), batch_size):
@@ -369,14 +567,39 @@ async def add_documents_to_db(
             source_str = b_metas[i].get("source", "")
             source_id = upsert_source(session, source_str) if source_str else None
             meta_with_size = {"chunk_size": len(b_texts[i]), **b_metas[i]}
+            content_class = str(meta_with_size.get("content_class") or ContentClass.TEXT.value)
+            is_active = bool(meta_with_size.get("is_active", True))
+            crawl_timestamp = _parse_iso_datetime(
+                meta_with_size.get("crawl_timestamp") or meta_with_size.get("crawl_time")
+            )
+            content_hash = meta_with_size.get("content_hash")
+            if not isinstance(content_hash, str) or not content_hash:
+                content_hash = hashlib.sha256(b_texts[i].encode("utf-8")).hexdigest()
+            retrieval_metadata = {
+                "source": meta_with_size.get("source"),
+                "url": meta_with_size.get("url"),
+                "crawl_type": meta_with_size.get("crawl_type"),
+                "markdown_variant": meta_with_size.get("markdown_variant"),
+                "extraction_strategy": meta_with_size.get("extraction_strategy"),
+                "session_id": meta_with_size.get("session_id"),
+                "source_type": meta_with_size.get("source_type"),
+            }
             rows.append(
                 CrawledPage(
                     source_id=source_id,
                     url=b_urls[i],
                     chunk_number=b_chunks[i],
                     content=b_texts[i],
+                    content_class=content_class,
+                    is_active=is_active,
+                    crawl_timestamp=crawl_timestamp,
+                    content_hash=content_hash,
                     page_metadata=meta_with_size,
+                    retrieval_metadata=retrieval_metadata,
                     embedding=emb,
+                    first_seen_at=first_seen_map.get((b_urls[i], b_chunks[i]), _now),
+                    last_seen_at=_now,
+                    last_crawled_at=crawl_timestamp,
                 )
             )
         try:
@@ -404,16 +627,21 @@ async def add_code_examples_to_db(
         return 0
 
     # Delete existing
+    first_seen_code_map: Dict[Tuple[str, int], datetime] = {}
     unique_urls = list(set(urls))
     try:
         to_delete = session.exec(select(CodeExample).where(CodeExample.url.in_(unique_urls))).all()
         for row in to_delete:
+            first_seen_code_map[(row.url, row.chunk_number)] = row.first_seen_at
             session.delete(row)
         if to_delete:
             session.commit()
     except SQLAlchemyError as exc:
         logger.warning(f"Delete before code insert failed: {exc}")
+        first_seen_code_map.clear()
         session.rollback()
+
+    _now_code = datetime.now(timezone.utc)
 
     try:
         embeddings = await create_embeddings_batch(contents)
@@ -425,6 +653,11 @@ async def add_code_examples_to_db(
     for i, emb in enumerate(embeddings):
         source_str = metadatas[i].get("source", "")
         source_id = upsert_source(session, source_str) if source_str else None
+        meta = metadatas[i] if isinstance(metadatas[i], dict) else {}
+        content_hash = meta.get("content_hash")
+        if not isinstance(content_hash, str) or not content_hash:
+            content_hash = hashlib.sha256(contents[i].encode("utf-8")).hexdigest()
+        crawl_ts = _parse_iso_datetime(meta.get("crawl_timestamp") or meta.get("crawl_time"))
         rows.append(
             CodeExample(
                 source_id=source_id,
@@ -433,8 +666,15 @@ async def add_code_examples_to_db(
                 language=languages[i],
                 content=contents[i],
                 summary=summaries[i],
-                ex_metadata=metadatas[i],
+                content_class=str(meta.get("content_class") or ContentClass.CODE.value),
+                is_active=bool(meta.get("is_active", True)),
+                crawl_timestamp=crawl_ts,
+                content_hash=content_hash,
+                ex_metadata=meta,
                 embedding=emb,
+                first_seen_at=first_seen_code_map.get((urls[i], chunk_numbers[i]), _now_code),
+                last_seen_at=_now_code,
+                last_crawled_at=crawl_ts,
             )
         )
     try:
@@ -515,6 +755,8 @@ async def search_documents(
                 "ts_rank(fts, plainto_tsquery('english', :q)) AS rank "
                 "FROM crawled_pages "
                 "WHERE fts @@ plainto_tsquery('english', :q) "
+                "AND is_active = TRUE "
+                "AND tombstoned_at IS NULL "
                 "AND CAST(:filt AS jsonb) <@ metadata "
                 "ORDER BY rank DESC LIMIT :cnt"
             ).bindparams(q=query, filt=filter_json, cnt=match_count * 2)
@@ -566,6 +808,9 @@ def _python_side_vector_search(
     """Fallback: compute cosine similarity in Python."""
     q = np.array(query_embedding, dtype=np.float32)
     pages = session.exec(select(CrawledPage)).all()
+
+    # Filter inactive and tombstoned pages (mirrors SQL match function behaviour)
+    pages = [p for p in pages if p.is_active and p.tombstoned_at is None]
 
     if filter_metadata:
         pages = [

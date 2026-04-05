@@ -98,19 +98,53 @@ The Crawl4AI RAG MCP server is just the beginning. Here's where we're headed:
 
 ## Tools
 
-The server provides four essential web crawling and search tools:
+The server exposes a modern MCP toolset for crawling, retrieval, and RAG workflows.
 
-1. **`crawl_single_page`**: Quickly crawl a single web page and store its content in the vector database
-2. **`smart_crawl_url`**: Intelligently crawl a full website based on the type of URL provided (sitemap, llms-full.txt, or a regular webpage that needs to be crawled recursively)
-3. **`get_available_sources`**: Get a list of all available sources (domains) in the database
-4. **`perform_rag_query`**: Search for relevant content using semantic search with optional source filtering
+### Recommended crawl entrypoint
+
+1. **`crawl_url`**: Unified crawl API (recommended). Supports:
+  - `mode="markdown"` for markdown-focused crawling
+  - `mode="smart"` for adaptive crawl strategy selection
+  - `mode="legacy"` for backward-compatible single-page behavior
+
+### Crawl and indexing tools
+
+2. **`crawl_to_markdown`**: Crawl one URL with markdown variants, extraction options, deep-crawl controls, and optional indexing
+3. **`crawl_many_urls`**: Crawl many URLs with extraction and optional deep-crawl behavior
+4. **`crawl_local_file`**: Crawl local file content through Crawl4AI pipeline
+5. **`crawl_raw_html`**: Crawl raw HTML content directly
+6. **`crawl_single_page`**: Legacy single-page crawl tool (kept for compatibility)
+7. **`smart_crawl_url`**: Adaptive crawl router for sitemap/txt/recursive/single strategies
+
+### Retrieval tools
+
+8. **`get_available_sources`**: List indexed sources (domains)
+9. **`perform_rag_query`**: Semantic retrieval query with optional source filtering
+10. **`search_documents_tool`**: Alias for semantic retrieval in newer taxonomy
+11. **`get_document_by_id`**: Retrieve one stored chunk by ID
+12. **`get_markdown_by_url`**: Reconstruct markdown from stored chunks for a URL
+
+### Legacy-to-modern tool mapping
+
+| Legacy tool | Status | Prefer this tool |
+|---|---|---|
+| `crawl_single_page` | Deprecated compatibility | `crawl_url` (`mode="legacy"` or `mode="markdown"`) |
+| `smart_crawl_url` | Deprecated compatibility | `crawl_url` (`mode="smart"`) |
+| `perform_rag_query` | Deprecated compatibility | `search_documents` |
+| `search_documents_tool` | Compatibility alias | `search_documents` |
+
+Modern taxonomy additions now available:
+- `crawl_with_session`
+- `extract_fit_markdown`, `extract_structured_json`, `extract_regex_entities`, `extract_knowledge_graph`, `extract_code_examples`
+- `index_markdown`, `index_fit_markdown`, `index_structured_content`, `index_code_examples`
+- `search_structured_content`, `get_fit_markdown_by_url`
 
 ## Prerequisites
 
 - [Docker/Docker Desktop](https://www.docker.com/products/docker-desktop/) if running the MCP server as a container (recommended)
 - [Python 3.12+](https://www.python.org/downloads/) if running the MCP server directly through uv
-- [Supabase](https://supabase.com/) (database for RAG)
-- [OpenAI API key](https://platform.openai.com/api-keys) (for generating embeddings)
+- PostgreSQL with pgvector (or the included docker-compose setup)
+- Ollama or compatible embedding provider configured via environment variables
 
 ## Installation
 
@@ -202,6 +236,22 @@ uv run src/crawl4ai_mcp.py
 The server will start and listen on the configured host and port.
 
 ## Integration with MCP Clients
+
+## Verification and smoke testing
+
+Use the integration smoke test against a running SSE server:
+
+```bash
+MCP_URL=http://localhost:8051/sse uv run python tests/integration_smoke.py
+```
+
+During rollout validation (after rebuilding to the latest image), enforce that newly introduced tools are present:
+
+```bash
+EXPECT_NEW_TOOLS=true MCP_URL=http://localhost:8051/sse uv run python tests/integration_smoke.py
+```
+
+When `EXPECT_NEW_TOOLS=true`, smoke will fail if `crawl_url` or `crawl_deep` are missing.
 
 ### SSE Configuration
 

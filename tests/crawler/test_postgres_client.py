@@ -124,6 +124,10 @@ class TestStoreCrawledDocuments:
         assert meta["crawl_type"] == "webpage_single"
         assert meta["chunk_index"] == 0
         assert "crawl_time" in meta
+        assert "crawl_timestamp" in meta
+        assert meta["content_class"] == "text"
+        assert meta["is_active"] is True
+        assert isinstance(meta["content_hash"], str) and len(meta["content_hash"]) == 64
 
     @pytest.mark.asyncio
     async def test_empty_results_list(self):
@@ -200,7 +204,17 @@ class TestFetchAvailableSources:
 def _mock_loop_running(raw_results):
     """Return a MagicMock loop whose run_until_complete returns raw_results."""
     loop = MagicMock()
-    loop.run_until_complete.return_value = raw_results
+
+    def _run_until_complete(awaitable):
+        # execute_rag_query builds a coroutine via search_documents(...).
+        # In mocked-loop tests we don't actually run it, so close it to avoid
+        # RuntimeWarning: coroutine was never awaited.
+        close = getattr(awaitable, "close", None)
+        if callable(close):
+            close()
+        return raw_results
+
+    loop.run_until_complete.side_effect = _run_until_complete
     return loop
 
 
@@ -225,16 +239,17 @@ class TestExecuteRagQuery:
         # We need to inspect what coroutine was created; use a real async mock.
         captured: dict = {}
 
-        async def fake_search(sess, q, match_count, filter_metadata):
+        def fake_search(sess, q, match_count, filter_metadata):
             captured["filter"] = filter_metadata
-            return []
+            fut = loop.create_future()
+            fut.set_result([])
+            return fut
 
         # Provide a real event loop so the coroutine actually executes.
         loop = asyncio.new_event_loop()
         try:
             with patch("asyncio.get_event_loop", return_value=loop), \
-                 patch("src.crawler.postgres_client.search_documents",
-                        side_effect=fake_search):
+                 patch("src.crawler.postgres_client.search_documents", side_effect=fake_search):
                 result = execute_rag_query(session, "q", source="example.com")
         finally:
             loop.close()
@@ -288,15 +303,16 @@ class TestExecuteRagQuery:
         session = MagicMock()
         captured: dict = {}
 
-        async def fake_search(sess, q, match_count, filter_metadata):
+        def fake_search(sess, q, match_count, filter_metadata):
             captured["match_count"] = match_count
-            return []
+            fut = loop.create_future()
+            fut.set_result([])
+            return fut
 
         loop = asyncio.new_event_loop()
         try:
             with patch("asyncio.get_event_loop", return_value=loop), \
-                 patch("src.crawler.postgres_client.search_documents",
-                        side_effect=fake_search):
+                 patch("src.crawler.postgres_client.search_documents", side_effect=fake_search):
                 execute_rag_query(session, "q", match_count=42)
         finally:
             loop.close()

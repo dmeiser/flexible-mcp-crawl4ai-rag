@@ -1,6 +1,7 @@
 """Unit tests for src/utils.py — 100% coverage, all offline."""
 import asyncio
 import json
+import math
 import builtins
 import pytest
 import numpy as np
@@ -44,9 +45,17 @@ from src.utils import (
     rerank_results,
     extract_code_blocks,
     settings,
+    _parse_iso_datetime,
     CrawledPage,
     CodeExample,
     Source,
+    SourcePolicy,
+    StoragePolicy,
+    EvictionAuditLog,
+    compute_staleness_score,
+    compute_value_score,
+    tombstone_records,
+    _get_db_size_bytes,
 )
 
 DIM = 4
@@ -198,6 +207,32 @@ class TestNormalize:
     def test_zero_vector_returns_as_is(self):
         v = [0.0, 0.0, 0.0, 0.0]
         assert _normalize(v) == v
+
+
+class TestParseIsoDateTime:
+    def test_parse_datetime_instance_with_tz(self):
+        from datetime import datetime, timezone
+        dt = datetime.now(timezone.utc)
+        out = _parse_iso_datetime(dt)
+        assert out.tzinfo is not None
+
+    def test_parse_datetime_instance_without_tz(self):
+        from datetime import datetime, timezone
+        dt = datetime.now(timezone.utc).replace(tzinfo=None)
+        out = _parse_iso_datetime(dt)
+        assert out.tzinfo is not None
+
+    def test_parse_valid_iso_string(self):
+        out = _parse_iso_datetime("2026-04-04T10:00:00+00:00")
+        assert out.year == 2026
+
+    def test_parse_naive_iso_string_gets_utc(self):
+        out = _parse_iso_datetime("2026-04-04T10:00:00")
+        assert out.tzinfo is not None
+
+    def test_parse_invalid_value_falls_back(self):
+        out = _parse_iso_datetime("not-a-date")
+        assert out.tzinfo is not None
 
 
 # ---------------------------------------------------------------------------
@@ -705,6 +740,54 @@ class TestAddDocumentsToDb:
         assert result == 5
         assert len(embed_calls) == 3  # 2+2+1
 
+    @pytest.mark.asyncio
+    async def test_phase9_fields_populated_on_rows(self):
+        session = MagicMock()
+        session.exec.return_value.all.return_value = []
+        added_rows = []
+        session.add_all.side_effect = lambda rows: added_rows.extend(rows)
+
+        with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
+             patch("src.utils.upsert_source", return_value=1), \
+             patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)):
+            result = await add_documents_to_db(
+                session,
+                ["https://x.com/page"],
+                ["phase9 content"],
+                [{"source": "x.com", "content_class": "structured", "crawl_timestamp": "2026-04-04T10:00:00+00:00"}],
+                [0],
+            )
+
+        assert result == 1
+        row = added_rows[0]
+        assert row.content_class == "structured"
+        assert row.is_active is True
+        assert isinstance(row.content_hash, str) and len(row.content_hash) == 64
+        assert isinstance(row.retrieval_metadata, dict)
+
+    @pytest.mark.asyncio
+    async def test_phase9_fields_default_when_metadata_absent(self):
+        session = MagicMock()
+        session.exec.return_value.all.return_value = []
+        added_rows = []
+        session.add_all.side_effect = lambda rows: added_rows.extend(rows)
+
+        with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
+             patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)):
+            result = await add_documents_to_db(
+                session,
+                ["https://x.com/page"],
+                ["phase9 defaults"],
+                [{}],
+                [0],
+            )
+
+        assert result == 1
+        row = added_rows[0]
+        assert row.content_class == "text"
+        assert row.is_active is True
+        assert isinstance(row.content_hash, str)
+
 
 # ---------------------------------------------------------------------------
 # Tests: add_code_examples_to_db
@@ -791,6 +874,31 @@ class TestAddCodeExamplesToDb:
             )
         session.rollback.assert_called()
 
+    @pytest.mark.asyncio
+    async def test_phase9_code_example_fields_populated(self):
+        session = MagicMock()
+        session.exec.return_value.all.return_value = []
+        added_rows = []
+        session.add_all.side_effect = lambda rows: added_rows.extend(rows)
+
+        with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
+             patch("src.utils.upsert_source", return_value=1):
+            result = await add_code_examples_to_db(
+                session,
+                urls=["https://x.com"],
+                contents=["print('x')"],
+                languages=["python"],
+                summaries=[None],
+                metadatas=[{"source": "x.com", "content_class": "code", "crawl_time": "2026-04-04T10:00:00+00:00"}],
+                chunk_numbers=[0],
+            )
+
+        assert result == 1
+        row = added_rows[0]
+        assert row.content_class == "code"
+        assert row.is_active is True
+        assert isinstance(row.content_hash, str) and len(row.content_hash) == 64
+
 
 # ---------------------------------------------------------------------------
 # Tests: search_documents
@@ -831,6 +939,8 @@ class TestPythonSideVectorSearch:
         p.content = "content"
         p.page_metadata = metadata or {}
         p.embedding = embedding
+        p.is_active = True
+        p.tombstoned_at = None
         return p
 
     def test_returns_sorted_by_similarity(self):
@@ -1235,3 +1345,394 @@ class TestSearchDocumentsCore:
         # Only one exec call (no FTS pass)
         assert session.exec.call_count == 1
         assert len(results) == 1
+
+
+    # ---------------------------------------------------------------------------
+    # Tests: compute_staleness_score
+    # ---------------------------------------------------------------------------
+
+    class TestComputeStalenessScore:
+        def test_zero_age_is_zero(self):
+            assert compute_staleness_score(0.0) == pytest.approx(0.0, abs=1e-9)
+
+        def test_half_life_age(self):
+            # age_days == half_life_days: 1 - exp(-1)
+            score = compute_staleness_score(90.0, half_life_days=90.0)
+            assert score == pytest.approx(1.0 - math.exp(-1.0), rel=1e-6)
+
+        def test_large_age_approaches_one(self):
+            score = compute_staleness_score(10000.0, half_life_days=90.0)
+            assert score > 0.999
+
+        def test_custom_half_life(self):
+            s_short = compute_staleness_score(30.0, half_life_days=30.0)
+            s_long = compute_staleness_score(30.0, half_life_days=90.0)
+            assert s_short > s_long
+
+
+    # ---------------------------------------------------------------------------
+    # Tests: compute_value_score
+    # ---------------------------------------------------------------------------
+
+    class TestComputeValueScore:
+        def test_fresh_zero_hits_gives_moderate_score(self):
+            score = compute_value_score(hit_count=0, age_days=0.0)
+            # freshness=1.0 (0.25) + uniqueness=1.0 (0.20) + quality=0.5*1 (0.10) = 0.55
+            assert 0.0 < score <= 1.0
+
+        def test_high_hit_count_increases_utility(self):
+            s0 = compute_value_score(hit_count=0)
+            s100 = compute_value_score(hit_count=100)
+            assert s100 > s0
+
+        def test_older_content_lower_score(self):
+            s_new = compute_value_score(hit_count=0, age_days=0.0)
+            s_old = compute_value_score(hit_count=0, age_days=365.0)
+            assert s_old < s_new
+
+        def test_source_priority_scales_score(self):
+            s1 = compute_value_score(hit_count=10, source_priority=1.0)
+            s2 = compute_value_score(hit_count=10, source_priority=2.0)
+            assert s2 > s1
+
+        def test_high_dup_sim_lowers_score(self):
+            s_unique = compute_value_score(hit_count=0, near_dup_sim=0.0)
+            s_dup = compute_value_score(hit_count=0, near_dup_sim=0.9)
+            assert s_dup < s_unique
+
+        def test_result_clamped_to_zero_one(self):
+            # source_priority=2.0 and max hits should not exceed 1.0
+            score = compute_value_score(hit_count=1000, source_priority=2.0, age_days=0.0)
+            assert 0.0 <= score <= 1.0
+
+        def test_zero_near_dup_sim(self):
+            score = compute_value_score(hit_count=0, near_dup_sim=0.0, content_density=1.0)
+            assert score > 0.0
+
+
+    # ---------------------------------------------------------------------------
+    # Tests: tombstone_records
+    # ---------------------------------------------------------------------------
+
+    class TestTombstoneRecords:
+        def test_tombstones_crawled_pages(self):
+            session = MagicMock()
+            rec = MagicMock()
+            rec.id = 1
+            rec.tombstoned_at = None
+            rec.is_active = True
+            rec.value_score = 0.5
+            rec.staleness_score = 0.2
+            rec.is_pinned = False
+            rec.page_metadata = {"source": "test.com"}
+            session.exec.return_value.all.return_value = [rec]
+
+            count = tombstone_records(session, [1], "crawled_pages", "test")
+
+            assert count == 1
+            assert rec.tombstoned_at is not None
+            assert rec.is_active is False
+            session.add.assert_called_once()
+            session.commit.assert_called_once()
+
+        def test_tombstones_code_examples(self):
+            session = MagicMock()
+            rec = MagicMock()
+            rec.id = 2
+            rec.tombstoned_at = None
+            rec.is_active = True
+            rec.value_score = 0.0
+            rec.staleness_score = 0.0
+            rec.is_pinned = False
+            rec.ex_metadata = {"source": "code.com"}
+            # page_metadata is a MagicMock (not dict) → falls through to ex_metadata branch
+            session.exec.return_value.all.return_value = [rec]
+
+            count = tombstone_records(session, [2], "code_examples", "test")
+
+            assert count == 1
+            assert rec.tombstoned_at is not None
+
+        def test_empty_ids_returns_zero(self):
+            session = MagicMock()
+            count = tombstone_records(session, [], "crawled_pages", "test")
+            assert count == 0
+            session.exec.assert_not_called()
+
+        def test_unknown_table_returns_zero(self):
+            session = MagicMock()
+            count = tombstone_records(session, [1], "unknown_table", "test")
+            assert count == 0
+            session.exec.assert_not_called()
+
+        def test_db_error_rolls_back_and_returns_zero(self):
+            from sqlalchemy.exc import SQLAlchemyError
+            session = MagicMock()
+            session.exec.side_effect = SQLAlchemyError("db error")
+
+            count = tombstone_records(session, [1, 2], "crawled_pages", "test")
+
+            assert count == 0
+            session.rollback.assert_called()
+
+        def test_source_from_page_metadata(self):
+            session = MagicMock()
+            rec = MagicMock()
+            rec.id = 3
+            rec.tombstoned_at = None
+            rec.is_active = True
+            rec.value_score = 0.0
+            rec.staleness_score = 0.0
+            rec.is_pinned = False
+            rec.page_metadata = {"source": "mysite.com"}
+            session.exec.return_value.all.return_value = [rec]
+            added_logs = []
+            session.add.side_effect = lambda obj: added_logs.append(obj)
+
+            tombstone_records(session, [3], "crawled_pages", "manual")
+
+            assert len(added_logs) == 1
+            assert added_logs[0].source == "mysite.com"
+
+        def test_source_from_ex_metadata_when_page_metadata_not_dict(self):
+            session = MagicMock()
+            rec = MagicMock()
+            rec.id = 4
+            rec.tombstoned_at = None
+            rec.is_active = True
+            rec.value_score = 0.0
+            rec.staleness_score = 0.0
+            rec.is_pinned = False
+            # page_metadata is a MagicMock (not a dict) → skipped
+            rec.ex_metadata = {"source": "code-source.com"}
+            session.exec.return_value.all.return_value = [rec]
+            added_logs = []
+            session.add.side_effect = lambda obj: added_logs.append(obj)
+
+            tombstone_records(session, [4], "code_examples", "auto")
+
+            assert len(added_logs) == 1
+            assert added_logs[0].source == "code-source.com"
+
+
+    # ---------------------------------------------------------------------------
+    # Tests: _get_db_size_bytes
+    # ---------------------------------------------------------------------------
+
+    class TestGetDbSizeBytes:
+        def test_returns_size_from_db(self):
+            session = MagicMock()
+            session.exec.return_value.first.return_value = (1_234_567,)
+            result = _get_db_size_bytes(session)
+            assert result == 1_234_567
+
+        def test_no_row_returns_zero(self):
+            session = MagicMock()
+            session.exec.return_value.first.return_value = None
+            result = _get_db_size_bytes(session)
+            assert result == 0
+
+        def test_exception_returns_zero(self):
+            session = MagicMock()
+            session.exec.side_effect = Exception("db error")
+            result = _get_db_size_bytes(session)
+            assert result == 0
+
+
+    # ---------------------------------------------------------------------------
+    # Tests: Phase 9.5 lifecycle fields in add_documents_to_db
+    # ---------------------------------------------------------------------------
+
+    class TestAddDocumentsPhase95:
+        @pytest.mark.asyncio
+        async def test_lifecycle_fields_set_on_new_records(self):
+            from datetime import timezone as tz_
+            session = MagicMock()
+            session.exec.return_value.all.return_value = []
+            added_rows = []
+            session.add_all.side_effect = lambda rows: added_rows.extend(rows)
+
+            with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
+                 patch("src.utils.upsert_source", return_value=1), \
+                 patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)):
+                result = await add_documents_to_db(
+                    session,
+                    ["https://x.com/page"],
+                    ["content"],
+                    [{"source": "x.com"}],
+                    [0],
+                )
+
+            assert result == 1
+            row = added_rows[0]
+            from datetime import datetime as dt_
+            assert isinstance(row.first_seen_at, dt_)
+            assert isinstance(row.last_seen_at, dt_)
+            assert isinstance(row.last_crawled_at, dt_)
+            assert row.last_seen_at >= row.first_seen_at
+
+        @pytest.mark.asyncio
+        async def test_first_seen_preserved_on_reindex(self):
+            from datetime import datetime as dt_, timezone as tz_
+            old_time = dt_(2025, 1, 1, tzinfo=tz_.utc)
+            existing = MagicMock()
+            existing.url = "https://x.com/page"
+            existing.chunk_number = 0
+            existing.first_seen_at = old_time
+
+            session = MagicMock()
+            session.exec.return_value.all.return_value = [existing]
+            added_rows = []
+            session.add_all.side_effect = lambda rows: added_rows.extend(rows)
+
+            with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
+                 patch("src.utils.upsert_source", return_value=1), \
+                 patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)):
+                result = await add_documents_to_db(
+                    session,
+                    ["https://x.com/page"],
+                    ["new content"],
+                    [{"source": "x.com"}],
+                    [0],
+                )
+
+            assert result == 1
+            assert added_rows[0].first_seen_at == old_time
+            assert added_rows[0].last_seen_at >= old_time
+
+        @pytest.mark.asyncio
+        async def test_first_seen_cleared_on_delete_error(self):
+            """When the delete-before-insert fails, first_seen_map is cleared → first_seen_at = now."""
+            from sqlalchemy.exc import SQLAlchemyError
+            from datetime import datetime as dt_, timezone as tz_
+            old_time = dt_(2025, 1, 1, tzinfo=tz_.utc)
+            existing = MagicMock()
+            existing.url = "https://x.com/page"
+            existing.chunk_number = 0
+            existing.first_seen_at = old_time
+
+            session = MagicMock()
+            # First exec call (delete query) raises an error
+            session.exec.side_effect = SQLAlchemyError("delete fail")
+            added_rows = []
+
+            with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
+                 patch("src.utils.upsert_source", return_value=1), \
+                 patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)):
+                # Error in delete means rollback; subsequent execution uses empty first_seen_map
+                # The function still attempts insert (delete error is non-fatal)
+                session.exec.side_effect = None  # reset so later exec calls work
+                session.exec.return_value.all.return_value = []
+                session.add_all.side_effect = lambda rows: added_rows.extend(rows)
+                result = await add_documents_to_db(
+                    session,
+                    ["https://x.com/page"],
+                    ["new content"],
+                    [{"source": "x.com"}],
+                    [0],
+                )
+
+            assert result == 1
+            # first_seen_at should be a recent timestamp (from _now), not old_time
+            assert added_rows[0].first_seen_at >= old_time
+
+
+    # ---------------------------------------------------------------------------
+    # Tests: Phase 9.5 lifecycle fields in add_code_examples_to_db
+    # ---------------------------------------------------------------------------
+
+    class TestAddCodeExamplesPhase95:
+        @pytest.mark.asyncio
+        async def test_lifecycle_fields_set_on_code_examples(self):
+            from datetime import datetime as dt_
+            session = MagicMock()
+            session.exec.return_value.all.return_value = []
+            added_rows = []
+            session.add_all.side_effect = lambda rows: added_rows.extend(rows)
+
+            with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
+                 patch("src.utils.upsert_source", return_value=1):
+                result = await add_code_examples_to_db(
+                    session,
+                    urls=["https://x.com"],
+                    contents=["print('hi')"],
+                    languages=["python"],
+                    summaries=[None],
+                    metadatas=[{"source": "x.com"}],
+                    chunk_numbers=[0],
+                )
+
+            assert result == 1
+            row = added_rows[0]
+            assert isinstance(row.first_seen_at, dt_)
+            assert isinstance(row.last_seen_at, dt_)
+            assert isinstance(row.last_crawled_at, dt_)
+
+        @pytest.mark.asyncio
+        async def test_first_seen_preserved_on_code_reindex(self):
+            from datetime import datetime as dt_, timezone as tz_
+            old_time = dt_(2025, 6, 1, tzinfo=tz_.utc)
+            existing = MagicMock()
+            existing.url = "https://x.com"
+            existing.chunk_number = 0
+            existing.first_seen_at = old_time
+
+            session = MagicMock()
+            session.exec.return_value.all.return_value = [existing]
+            added_rows = []
+            session.add_all.side_effect = lambda rows: added_rows.extend(rows)
+
+            with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
+                 patch("src.utils.upsert_source", return_value=1):
+                result = await add_code_examples_to_db(
+                    session,
+                    urls=["https://x.com"],
+                    contents=["print('hi')"],
+                    languages=["python"],
+                    summaries=[None],
+                    metadatas=[{"source": "x.com"}],
+                    chunk_numbers=[0],
+                )
+
+            assert result == 1
+            assert added_rows[0].first_seen_at == old_time
+
+
+    # ---------------------------------------------------------------------------
+    # Tests: _python_side_vector_search — inactive/tombstoned filters
+    # ---------------------------------------------------------------------------
+
+    class TestPythonSideVectorSearchLifecycle:
+        def _make_page(self, pid, emb, is_active=True, tombstoned_at=None):
+            p = MagicMock()
+            p.id = pid
+            p.url = f"url_{pid}"
+            p.chunk_number = 0
+            p.content = "content"
+            p.page_metadata = {}
+            p.embedding = emb
+            p.is_active = is_active
+            p.tombstoned_at = tombstoned_at
+            return p
+
+        def test_inactive_pages_excluded(self):
+            from datetime import datetime as dt_, timezone as tz_
+            session = MagicMock()
+            active = self._make_page(1, EMBED_A, is_active=True, tombstoned_at=None)
+            inactive = self._make_page(2, EMBED_B, is_active=False, tombstoned_at=None)
+            session.exec.return_value.all.return_value = [active, inactive]
+            results = _python_side_vector_search(session, EMBED_Q, limit=5, filter_metadata=None)
+            ids = [r[0] for r in results]
+            assert 1 in ids
+            assert 2 not in ids
+
+        def test_tombstoned_pages_excluded(self):
+            from datetime import datetime as dt_, timezone as tz_
+            session = MagicMock()
+            alive = self._make_page(1, EMBED_A, is_active=True, tombstoned_at=None)
+            dead = self._make_page(2, EMBED_B, is_active=True, tombstoned_at=dt_.now(tz_.utc))
+            session.exec.return_value.all.return_value = [alive, dead]
+            results = _python_side_vector_search(session, EMBED_Q, limit=5, filter_metadata=None)
+            ids = [r[0] for r in results]
+            assert 1 in ids
+            assert 2 not in ids

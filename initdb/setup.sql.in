@@ -25,7 +25,22 @@ CREATE TABLE IF NOT EXISTS crawled_pages (
     url           TEXT NOT NULL,
     chunk_number  INTEGER NOT NULL,
     content       TEXT NOT NULL,
+    content_class TEXT NOT NULL DEFAULT 'text',
+    is_active     BOOLEAN NOT NULL DEFAULT TRUE,
+    crawl_timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    content_hash  TEXT,
+    first_seen_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_crawled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at      TIMESTAMPTZ,
+    is_pinned       BOOLEAN NOT NULL DEFAULT FALSE,
+    tombstoned_at   TIMESTAMPTZ,
+    staleness_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    value_score     DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    last_hit_at     TIMESTAMPTZ,
+    hit_count       BIGINT NOT NULL DEFAULT 0,
     metadata      JSONB NOT NULL DEFAULT '{}'::jsonb,
+    retrieval_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     embedding     VECTOR(:embedding_dim),
     fts           TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -43,11 +58,102 @@ CREATE TABLE IF NOT EXISTS code_examples (
     language      TEXT,
     content       TEXT NOT NULL,
     summary       TEXT,
+    content_class TEXT NOT NULL DEFAULT 'code',
+    is_active     BOOLEAN NOT NULL DEFAULT TRUE,
+    crawl_timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    content_hash  TEXT,
+    first_seen_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_crawled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at      TIMESTAMPTZ,
+    is_pinned       BOOLEAN NOT NULL DEFAULT FALSE,
+    tombstoned_at   TIMESTAMPTZ,
+    staleness_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    value_score     DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    last_hit_at     TIMESTAMPTZ,
+    hit_count       BIGINT NOT NULL DEFAULT 0,
     metadata      JSONB NOT NULL DEFAULT '{}'::jsonb,
     embedding     VECTOR(:embedding_dim),
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (url, chunk_number)
 );
+
+-- -----------------------------------------------------------------------
+-- source_policies: per-source freshness and eviction configuration
+-- -----------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS source_policies (
+    source                 TEXT PRIMARY KEY,
+    ttl_days               INT NOT NULL DEFAULT 90,
+    recrawl_interval_hours INT NOT NULL DEFAULT 168,
+    priority_weight        DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    min_active_docs        INT NOT NULL DEFAULT 20,
+    max_source_size_mb     INT,
+    created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- -----------------------------------------------------------------------
+-- storage_policies: global storage budget configuration (single-row)
+-- -----------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS storage_policies (
+    id                      BIGSERIAL PRIMARY KEY,
+    is_singleton            BOOLEAN NOT NULL DEFAULT TRUE UNIQUE,
+    max_db_size_gb          DOUBLE PRECISION NOT NULL DEFAULT 10.0,
+    warn_threshold          DOUBLE PRECISION NOT NULL DEFAULT 0.80,
+    high_threshold          DOUBLE PRECISION NOT NULL DEFAULT 0.90,
+    hard_threshold          DOUBLE PRECISION NOT NULL DEFAULT 1.00,
+    target_post_evict_ratio DOUBLE PRECISION NOT NULL DEFAULT 0.75,
+    tombstone_grace_hours   INT NOT NULL DEFAULT 24,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+INSERT INTO storage_policies (is_singleton) VALUES (TRUE) ON CONFLICT (is_singleton) DO NOTHING;
+
+-- -----------------------------------------------------------------------
+-- eviction_audit_log: records of tombstoning/eviction actions
+-- -----------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS eviction_audit_log (
+    id              BIGSERIAL PRIMARY KEY,
+    table_name      TEXT NOT NULL,
+    record_id       BIGINT NOT NULL,
+    source          TEXT,
+    evicted_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    reason          TEXT NOT NULL,
+    value_score     DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    staleness_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    was_pinned      BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS content_class TEXT NOT NULL DEFAULT 'text';
+ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS crawl_timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS content_hash TEXT;
+ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS retrieval_metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS last_crawled_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS tombstoned_at TIMESTAMPTZ;
+ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS staleness_score DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS value_score DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS last_hit_at TIMESTAMPTZ;
+ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS hit_count BIGINT NOT NULL DEFAULT 0;
+
+ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS content_class TEXT NOT NULL DEFAULT 'code';
+ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS crawl_timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS content_hash TEXT;
+ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS last_crawled_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS tombstoned_at TIMESTAMPTZ;
+ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS staleness_score DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS value_score DOUBLE PRECISION NOT NULL DEFAULT 0.0;
+ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS last_hit_at TIMESTAMPTZ;
+ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS hit_count BIGINT NOT NULL DEFAULT 0;
 
 -- -----------------------------------------------------------------------
 -- Indexes
@@ -65,12 +171,66 @@ CREATE INDEX IF NOT EXISTS idx_crawled_pages_source
 CREATE INDEX IF NOT EXISTS idx_crawled_pages_fts
     ON crawled_pages USING gin (fts);
 
+CREATE INDEX IF NOT EXISTS idx_crawled_pages_content_class
+    ON crawled_pages (content_class);
+
+CREATE INDEX IF NOT EXISTS idx_crawled_pages_is_active
+    ON crawled_pages (is_active);
+
+CREATE INDEX IF NOT EXISTS idx_crawled_pages_crawl_timestamp
+    ON crawled_pages (crawl_timestamp);
+
+CREATE INDEX IF NOT EXISTS idx_crawled_pages_content_hash
+    ON crawled_pages (content_hash);
+
 CREATE INDEX IF NOT EXISTS idx_code_examples_embedding
     ON code_examples USING ivfflat (embedding vector_cosine_ops)
     WITH (lists = 100);
 
 CREATE INDEX IF NOT EXISTS idx_code_examples_metadata
     ON code_examples USING gin (metadata);
+
+CREATE INDEX IF NOT EXISTS idx_code_examples_content_class
+    ON code_examples (content_class);
+
+CREATE INDEX IF NOT EXISTS idx_code_examples_is_active
+    ON code_examples (is_active);
+
+CREATE INDEX IF NOT EXISTS idx_code_examples_crawl_timestamp
+    ON code_examples (crawl_timestamp);
+
+CREATE INDEX IF NOT EXISTS idx_code_examples_content_hash
+    ON code_examples (content_hash);
+
+CREATE INDEX IF NOT EXISTS idx_crawled_pages_tombstoned_at
+    ON crawled_pages (tombstoned_at);
+
+CREATE INDEX IF NOT EXISTS idx_crawled_pages_expires_at
+    ON crawled_pages (expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_crawled_pages_is_pinned
+    ON crawled_pages (is_pinned);
+
+CREATE INDEX IF NOT EXISTS idx_crawled_pages_value_score
+    ON crawled_pages (value_score);
+
+CREATE INDEX IF NOT EXISTS idx_crawled_pages_hit_count
+    ON crawled_pages (hit_count);
+
+CREATE INDEX IF NOT EXISTS idx_code_examples_tombstoned_at
+    ON code_examples (tombstoned_at);
+
+CREATE INDEX IF NOT EXISTS idx_code_examples_expires_at
+    ON code_examples (expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_code_examples_is_pinned
+    ON code_examples (is_pinned);
+
+CREATE INDEX IF NOT EXISTS idx_code_examples_value_score
+    ON code_examples (value_score);
+
+CREATE INDEX IF NOT EXISTS idx_code_examples_hit_count
+    ON code_examples (hit_count);
 
 -- -----------------------------------------------------------------------
 -- match_crawled_pages: vector similarity search
@@ -100,7 +260,10 @@ BEGIN
         cp.metadata,
         1 - (cp.embedding <=> query_embedding) AS similarity
     FROM crawled_pages cp
-    WHERE cp.metadata @> filter
+        WHERE cp.is_active = TRUE
+            AND cp.tombstoned_at IS NULL
+            AND (cp.expires_at IS NULL OR cp.expires_at > NOW())
+            AND cp.metadata @> filter
     ORDER BY cp.embedding <=> query_embedding
     LIMIT match_count;
 END;
@@ -138,7 +301,10 @@ BEGIN
         ce.metadata,
         1 - (ce.embedding <=> query_embedding) AS similarity
     FROM code_examples ce
-    WHERE ce.metadata @> filter
+        WHERE ce.is_active = TRUE
+            AND ce.tombstoned_at IS NULL
+            AND (ce.expires_at IS NULL OR ce.expires_at > NOW())
+            AND ce.metadata @> filter
     ORDER BY ce.embedding <=> query_embedding
     LIMIT match_count;
 END;
@@ -150,6 +316,9 @@ $$;
 ALTER TABLE sources ENABLE ROW LEVEL SECURITY;
 ALTER TABLE crawled_pages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE code_examples ENABLE ROW LEVEL SECURITY;
+ALTER TABLE source_policies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE storage_policies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE eviction_audit_log ENABLE ROW LEVEL SECURITY;
 
 DO $$
 BEGIN
@@ -167,6 +336,21 @@ BEGIN
         SELECT 1 FROM pg_policies WHERE tablename = 'sources' AND policyname = 'allow_public_read'
     ) THEN
         CREATE POLICY allow_public_read ON sources FOR SELECT TO PUBLIC USING (true);
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies WHERE tablename = 'source_policies' AND policyname = 'allow_public_read'
+    ) THEN
+        CREATE POLICY allow_public_read ON source_policies FOR SELECT TO PUBLIC USING (true);
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies WHERE tablename = 'storage_policies' AND policyname = 'allow_public_read'
+    ) THEN
+        CREATE POLICY allow_public_read ON storage_policies FOR SELECT TO PUBLIC USING (true);
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies WHERE tablename = 'eviction_audit_log' AND policyname = 'allow_public_read'
+    ) THEN
+        CREATE POLICY allow_public_read ON eviction_audit_log FOR SELECT TO PUBLIC USING (true);
     END IF;
 END;
 $$;

@@ -17,6 +17,7 @@ dependencies = [
     "numpy>=1.26.0",
     "nltk>=3.8.0",
     "sentence-transformers>=3.0.0",
+    "apscheduler>=3.10.0",
 ]
 
 [project.optional-dependencies]
