@@ -86,6 +86,14 @@ async def _job_hard_delete_tombstones(crawler: AsyncWebCrawler) -> None:
         logger.error(f"scheduled job hard_delete_tombstones failed: {exc}", exc_info=True)
 
 
+async def _job_detect_content_drift(crawler: AsyncWebCrawler) -> None:
+    try:
+        from src.crawler import tool_definitions as _td
+        await _td.detect_content_drift(_make_scheduler_ctx(crawler), trigger_selective_reembed=True)
+    except Exception as exc:
+        logger.error(f"scheduled job detect_content_drift failed: {exc}", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     """Start crawler and verify DB connection, then yield context."""
@@ -149,8 +157,16 @@ async def lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
             max_instances=1,
             coalesce=True,
         )
+        scheduler.add_job(
+            _job_detect_content_drift,
+            IntervalTrigger(hours=3, jitter=60),
+            kwargs={"crawler": crawler},
+            id="detect_content_drift_3h",
+            max_instances=1,
+            coalesce=True,
+        )
         scheduler.start()
-        logger.info("APScheduler started with 5 maintenance jobs.")
+        logger.info("APScheduler started with 6 maintenance jobs.")
 
         yield AppContext(crawler=crawler, scheduler=scheduler)
     finally:
@@ -176,22 +192,27 @@ mcp = FastMCP(
 # ---------------------------------------------------------------------------
 from src.crawler import tool_definitions  # noqa: E402
 
-mcp.tool()(tool_definitions.crawl_single_page)
 mcp.tool()(tool_definitions.crawl_url)
 mcp.tool()(tool_definitions.crawl_to_markdown)
 mcp.tool()(tool_definitions.crawl_many_urls)
 mcp.tool()(tool_definitions.crawl_deep)
 mcp.tool()(tool_definitions.crawl_adaptive)
 mcp.tool()(tool_definitions.crawl_with_session)
+mcp.tool()(tool_definitions.crawl_with_auth_hooks)
+mcp.tool()(tool_definitions.crawl_login_required)
+mcp.tool()(tool_definitions.crawl_paginated)
 mcp.tool()(tool_definitions.create_session)
 mcp.tool()(tool_definitions.kill_session)
 mcp.tool()(tool_definitions.inspect_session)
 mcp.tool()(tool_definitions.crawl_with_browser_config)
 mcp.tool()(tool_definitions.crawl_local_file)
 mcp.tool()(tool_definitions.crawl_raw_html)
+mcp.tool()(tool_definitions.ingest_content_directory)
 mcp.tool()(tool_definitions.extract_markdown_variants)
 mcp.tool()(tool_definitions.extract_fit_markdown)
 mcp.tool()(tool_definitions.extract_structured_json)
+mcp.tool()(tool_definitions.generate_extraction_schema)
+mcp.tool()(tool_definitions.validate_extraction_schema)
 mcp.tool()(tool_definitions.extract_regex_entities)
 mcp.tool()(tool_definitions.extract_knowledge_graph)
 mcp.tool()(tool_definitions.extract_code_examples)
@@ -200,12 +221,10 @@ mcp.tool()(tool_definitions.index_fit_markdown)
 mcp.tool()(tool_definitions.index_structured_content)
 mcp.tool()(tool_definitions.index_code_examples)
 mcp.tool(name="search_documents")(tool_definitions.search_documents_v2)
+mcp.tool()(tool_definitions.search_raw_markdown)
+mcp.tool()(tool_definitions.search_fit_markdown)
 mcp.tool()(tool_definitions.search_structured_content)
 mcp.tool()(tool_definitions.get_fit_markdown_by_url)
-mcp.tool()(tool_definitions.smart_crawl_url)
-mcp.tool()(tool_definitions.get_available_sources)
-mcp.tool()(tool_definitions.perform_rag_query)
-mcp.tool()(tool_definitions.search_documents_tool)
 mcp.tool()(tool_definitions.get_document_by_id)
 mcp.tool()(tool_definitions.get_markdown_by_url)
 

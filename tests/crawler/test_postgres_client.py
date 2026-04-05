@@ -1,8 +1,7 @@
 """Unit tests for src/crawler/postgres_client.py — 100% coverage, offline."""
-import asyncio
 import os
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch
 
 os.environ.setdefault("POSTGRES_URL", "postgresql://u:p@localhost:5432/testdb")
 os.environ.setdefault("EMBEDDING_PROVIDER", "ollama")
@@ -10,11 +9,7 @@ os.environ.setdefault("OLLAMA_API_URL", "http://localhost:11434/api/embeddings")
 os.environ.setdefault("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 os.environ.setdefault("EMBEDDING_DIM", "4")
 
-from src.crawler.postgres_client import (
-    store_crawled_documents,
-    fetch_available_sources,
-    execute_rag_query,
-)
+from src.crawler.postgres_client import store_crawled_documents
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +125,36 @@ class TestStoreCrawledDocuments:
         assert isinstance(meta["content_hash"], str) and len(meta["content_hash"]) == 64
 
     @pytest.mark.asyncio
+    async def test_reference_metadata_preserved(self):
+        """Variant reference metadata is forwarded into stored chunk metadata."""
+        session = MagicMock()
+        crawl_results = [{
+            "url": "https://example.com/page",
+            "markdown": "Hello world.",
+            "selected_variant": "raw_markdown",
+            "variant_values": {
+                "references_markdown": "[1]: https://example.com/ref Example reference",
+                "markdown_with_citations": "Hello world [1]",
+            },
+        }]
+        captured_metas: list = []
+
+        async def fake_chunk(text):
+            return [text]
+
+        async def capture_add(sess, urls, contents, metas, chunk_nums, full_docs):
+            captured_metas.extend(metas)
+            return 1
+
+        with patch("src.crawler.postgres_client.chunk_text_according_to_settings", side_effect=fake_chunk), \
+             patch("src.crawler.postgres_client.add_documents_to_db", side_effect=capture_add):
+            await store_crawled_documents(session, crawl_results, "webpage_single")
+
+        assert captured_metas[0]["markdown_variant"] == "raw_markdown"
+        assert captured_metas[0]["has_citations"] is True
+        assert captured_metas[0]["link_references"][0]["url"] == "https://example.com/ref"
+
+    @pytest.mark.asyncio
     async def test_empty_results_list(self):
         """Empty crawl_results returns (0, 0) without calling add_documents_to_db."""
         session = MagicMock()
@@ -162,159 +187,38 @@ class TestStoreCrawledDocuments:
         assert pages == 2   # total results in list
         assert chunks == 1  # only one chunk stored
 
-
-# ---------------------------------------------------------------------------
-# Tests: fetch_available_sources
-# ---------------------------------------------------------------------------
-
-class TestFetchAvailableSources:
-    def test_empty_db_returns_empty_list(self):
+    @pytest.mark.asyncio
+    async def test_extra_metadata_is_forwarded(self):
+        """Optional source/artifact metadata keys are forwarded when present."""
         session = MagicMock()
-        session.exec.return_value.all.return_value = []
-        assert fetch_available_sources(session) == []
+        crawl_results = [{
+            "url": "https://example.com/with-meta",
+            "markdown": "Hello.",
+            "source_change_id": "etag:abc",
+            "link_graph": {"total_links": 1},
+            "media_metadata": {"image_count": 0},
+            "session_id": "session-123",
+            "run_id": "run-xyz",
+        }]
+        captured_metas: list = []
 
-    def test_returns_sorted_unique_sources(self):
-        session = MagicMock()
-        session.exec.return_value.all.return_value = ["z.com", "a.com", "a.com", "m.com"]
-        assert fetch_available_sources(session) == ["a.com", "m.com", "z.com"]
+        async def fake_chunk(text):
+            return [text]
 
-    def test_none_values_filtered_out(self):
-        session = MagicMock()
-        session.exec.return_value.all.return_value = ["a.com", None, "b.com"]
-        assert fetch_available_sources(session) == ["a.com", "b.com"]
+        async def capture_add(sess, urls, contents, metas, chunk_nums, full_docs):
+            captured_metas.extend(metas)
+            return 1
 
-    def test_empty_string_filtered_out(self):
-        session = MagicMock()
-        session.exec.return_value.all.return_value = ["a.com", "", "b.com"]
-        assert fetch_available_sources(session) == ["a.com", "b.com"]
+        with patch("src.crawler.postgres_client.chunk_text_according_to_settings", side_effect=fake_chunk), \
+             patch("src.crawler.postgres_client.add_documents_to_db", side_effect=capture_add):
+            pages, chunks = await store_crawled_documents(session, crawl_results, "webpage")
 
-    def test_duplicates_deduplicated(self):
-        session = MagicMock()
-        session.exec.return_value.all.return_value = ["x.com", "x.com", "x.com"]
-        assert fetch_available_sources(session) == ["x.com"]
-
-
-# ---------------------------------------------------------------------------
-# Tests: execute_rag_query
-# ---------------------------------------------------------------------------
-# execute_rag_query is a sync wrapper that calls search_documents via
-# asyncio.get_event_loop().run_until_complete().  We mock the event loop
-# so no real coroutine execution is needed.
-
-def _mock_loop_running(raw_results):
-    """Return a MagicMock loop whose run_until_complete returns raw_results."""
-    loop = MagicMock()
-
-    def _run_until_complete(awaitable):
-        # execute_rag_query builds a coroutine via search_documents(...).
-        # In mocked-loop tests we don't actually run it, so close it to avoid
-        # RuntimeWarning: coroutine was never awaited.
-        close = getattr(awaitable, "close", None)
-        if callable(close):
-            close()
-        return raw_results
-
-    loop.run_until_complete.side_effect = _run_until_complete
-    return loop
+        assert pages == 1
+        assert chunks == 1
+        assert captured_metas[0]["source_change_id"] == "etag:abc"
+        assert captured_metas[0]["link_graph"]["total_links"] == 1
+        assert captured_metas[0]["media_metadata"]["image_count"] == 0
+        assert captured_metas[0]["session_id"] == "session-123"
+        assert captured_metas[0]["run_id"] == "run-xyz"
 
 
-class TestExecuteRagQuery:
-    def test_no_source_no_filter_passes_none(self):
-        """When source and filter_metadata are both absent, filter arg is None."""
-        session = MagicMock()
-        loop = _mock_loop_running([])
-
-        with patch("asyncio.get_event_loop", return_value=loop):
-            result = execute_rag_query(session, "query")
-
-        assert result == []
-        # The second positional arg to run_until_complete is the coroutine;
-        # we just verify it was called once.
-        loop.run_until_complete.assert_called_once()
-
-    def test_source_builds_filter_dict(self):
-        """Passing source adds {"source": …} to the filter."""
-        session = MagicMock()
-
-        # We need to inspect what coroutine was created; use a real async mock.
-        captured: dict = {}
-
-        def fake_search(sess, q, match_count, filter_metadata):
-            captured["filter"] = filter_metadata
-            fut = loop.create_future()
-            fut.set_result([])
-            return fut
-
-        # Provide a real event loop so the coroutine actually executes.
-        loop = asyncio.new_event_loop()
-        try:
-            with patch("asyncio.get_event_loop", return_value=loop), \
-                 patch("src.crawler.postgres_client.search_documents", side_effect=fake_search):
-                result = execute_rag_query(session, "q", source="example.com")
-        finally:
-            loop.close()
-
-        assert result == []
-        assert captured["filter"] == {"source": "example.com"}
-
-    def test_filter_metadata_merged_with_source(self):
-        """filter_metadata kwarg is merged with source."""
-        session = MagicMock()
-        captured: dict = {}
-
-        async def fake_search(sess, q, match_count, filter_metadata):
-            captured["filter"] = filter_metadata
-            return []
-
-        loop = asyncio.new_event_loop()
-        try:
-            with patch("asyncio.get_event_loop", return_value=loop), \
-                 patch("src.crawler.postgres_client.search_documents",
-                        side_effect=fake_search):
-                execute_rag_query(session, "q", source="x.com",
-                                  filter_metadata={"lang": "en"})
-        finally:
-            loop.close()
-
-        assert captured["filter"] == {"source": "x.com", "lang": "en"}
-
-    def test_results_transformed_to_standard_format(self):
-        """Results are mapped to {url, content, metadata, similarity}."""
-        session = MagicMock()
-        raw = [
-            {"url": "http://a.com", "content": "text", "page_metadata": {"k": "v"},
-             "similarity_score": 0.9},
-            {"url": "http://b.com", "content": "more", "page_metadata": {},
-             "similarity_score": 0.7},
-        ]
-        loop = _mock_loop_running(raw)
-
-        with patch("asyncio.get_event_loop", return_value=loop):
-            result = execute_rag_query(session, "q")
-
-        assert len(result) == 2
-        assert result[0] == {"url": "http://a.com", "content": "text",
-                              "metadata": {"k": "v"}, "similarity": 0.9}
-        assert result[1] == {"url": "http://b.com", "content": "more",
-                              "metadata": {}, "similarity": 0.7}
-
-    def test_match_count_forwarded(self):
-        """match_count is passed through to search_documents."""
-        session = MagicMock()
-        captured: dict = {}
-
-        def fake_search(sess, q, match_count, filter_metadata):
-            captured["match_count"] = match_count
-            fut = loop.create_future()
-            fut.set_result([])
-            return fut
-
-        loop = asyncio.new_event_loop()
-        try:
-            with patch("asyncio.get_event_loop", return_value=loop), \
-                 patch("src.crawler.postgres_client.search_documents", side_effect=fake_search):
-                execute_rag_query(session, "q", match_count=42)
-        finally:
-            loop.close()
-
-        assert captured["match_count"] == 42

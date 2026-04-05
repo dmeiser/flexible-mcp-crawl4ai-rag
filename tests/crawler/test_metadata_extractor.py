@@ -1,6 +1,10 @@
 """Unit tests for src/crawler/metadata_extractor.py — 100% coverage, all offline."""
 import pytest
-from src.crawler.metadata_extractor import extract_section_info
+from src.crawler.metadata_extractor import (
+    extract_section_info,
+    extract_link_graph,
+    extract_media_metadata,
+)
 
 
 class TestExtractSectionInfo:
@@ -50,3 +54,40 @@ class TestExtractSectionInfo:
         chunk = "abc"
         result = extract_section_info(chunk)
         assert result["char_count"] == 3
+
+
+class TestLinkAndMediaExtraction:
+    def test_extract_link_graph_empty(self):
+        out = extract_link_graph("")
+        assert out["total_links"] == 0
+        assert out["links"] == []
+
+    def test_extract_link_graph_internal_external(self):
+        md = "[Internal](/docs) and [External](https://other.com/page)"
+        out = extract_link_graph(md, base_url="https://example.com")
+        assert out["total_links"] == 2
+        assert out["internal_links"] >= 1
+        assert out["external_links"] >= 1
+
+    def test_extract_media_metadata(self):
+        md = "![Alt text](https://example.com/image.png)\n[Video](https://example.com/demo.mp4)"
+        out = extract_media_metadata(md)
+        assert out["image_count"] == 1
+        assert out["media_link_count"] >= 1
+        assert out["images"][0]["alt_text"] == "Alt text"
+
+    def test_extract_link_graph_skips_blank_href(self):
+        md = "[Empty](   ) [Valid](https://example.com/page)"
+        out = extract_link_graph(md, base_url="https://example.com")
+        assert out["total_links"] == 1
+        assert out["links"][0]["url"] == "https://example.com/page"
+
+    def test_extract_media_metadata_skips_blank_urls(self):
+        md = "[]( ) [Plain](https://example.com/page)"
+        out = extract_media_metadata(md)
+        assert out["media_link_count"] == 0
+
+    def test_extract_media_metadata_empty_markdown(self):
+        out = extract_media_metadata("")
+        assert out["image_count"] == 0
+        assert out["media_link_count"] == 0

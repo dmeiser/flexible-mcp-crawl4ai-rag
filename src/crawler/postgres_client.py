@@ -1,20 +1,13 @@
 """PostgreSQL client — document storage and retrieval operations."""
 import logging
 import hashlib
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from urllib.parse import urlparse
 from datetime import datetime, timezone
 
 from sqlmodel import Session
 
-from ..utils import (
-    add_documents_to_db,
-    search_documents,
-    CrawledPage,
-    Source,
-    settings,
-    get_session,
-)
+from ..utils import add_documents_to_db, extract_link_references
 from .metadata_extractor import extract_section_info
 from .web_crawler import chunk_text_according_to_settings
 
@@ -45,7 +38,16 @@ async def store_crawled_documents(
             logger.warning(f"No markdown for {source_url}, skipping.")
             continue
 
+        variant_values = doc.get("variant_values") if isinstance(doc.get("variant_values"), dict) else {}
+        references_markdown = variant_values.get("references_markdown") or ""
+        selected_variant = doc.get("selected_variant") or doc.get("markdown_variant")
+        link_references = extract_link_references(references_markdown)
+
         chunks = await chunk_text_according_to_settings(markdown)
+        extra_metadata: Dict[str, Any] = {}
+        for key in ("source_change_id", "link_graph", "media_metadata", "session_id", "run_id"):
+            if key in doc:
+                extra_metadata[key] = doc.get(key)
         for i, chunk in enumerate(chunks):
             meta = extract_section_info(chunk)
             meta.update({
@@ -58,7 +60,13 @@ async def store_crawled_documents(
                 "content_class": "text",
                 "is_active": True,
                 "content_hash": hashlib.sha256(chunk.encode("utf-8")).hexdigest(),
+                "markdown_variant": selected_variant,
+                "references_markdown": references_markdown,
+                "link_references": link_references,
+                "has_citations": bool(variant_values.get("markdown_with_citations")),
             })
+            if extra_metadata:
+                meta.update(extra_metadata)
             all_urls.append(source_url)
             all_contents.append(chunk)
             all_metadatas.append(meta)
@@ -73,33 +81,3 @@ async def store_crawled_documents(
     return len(crawl_results), len(all_contents)
 
 
-def fetch_available_sources(session: Session) -> List[str]:
-    """Return sorted list of unique source domains from the sources table."""
-    from sqlmodel import select
-    results = session.exec(select(Source.source)).all()
-    return sorted({s for s in results if s})
-
-
-def execute_rag_query(
-    session: Session,
-    query: str,
-    source: Optional[str] = None,
-    match_count: int = 5,
-    filter_metadata: Optional[Dict[str, Any]] = None,
-) -> List[Dict[str, Any]]:
-    """Synchronous RAG query wrapper (kept for backward compat; prefer async search_documents)."""
-    import asyncio
-    combined: Dict[str, Any] = {}
-    if source:
-        combined["source"] = source
-    if filter_metadata:
-        combined.update(filter_metadata)
-
-    results = asyncio.get_event_loop().run_until_complete(
-        search_documents(session, query, match_count=match_count, filter_metadata=combined or None)
-    )
-    return [
-        {"url": r.get("url"), "content": r.get("content"),
-         "metadata": r.get("page_metadata"), "similarity": r.get("similarity_score")}
-        for r in results
-    ]

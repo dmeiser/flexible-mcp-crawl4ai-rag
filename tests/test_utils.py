@@ -56,6 +56,7 @@ from src.utils import (
     compute_value_score,
     tombstone_records,
     _get_db_size_bytes,
+    extract_link_references,
 )
 
 DIM = 4
@@ -91,6 +92,8 @@ def _fake_settings(**kw):
         USE_HYBRID_SEARCH=False,
         USE_AGENTIC_RAG=False,
         USE_RERANKING=False,
+        MARKDOWN_INDEX_POLICY="both-by-default",
+        MARKDOWN_FALLBACK_ENABLED=True,
         LLM_ENABLED=False,
         LLM_API_KEY=None,
         LLM_BASE_URL=None,
@@ -754,7 +757,7 @@ class TestAddDocumentsToDb:
                 session,
                 ["https://x.com/page"],
                 ["phase9 content"],
-                [{"source": "x.com", "content_class": "structured", "crawl_timestamp": "2026-04-04T10:00:00+00:00"}],
+                [{"source": "x.com", "content_class": "structured", "crawl_timestamp": "2026-04-04T10:00:00+00:00", "run_id": "run-abc"}],
                 [0],
             )
 
@@ -764,6 +767,36 @@ class TestAddDocumentsToDb:
         assert row.is_active is True
         assert isinstance(row.content_hash, str) and len(row.content_hash) == 64
         assert isinstance(row.retrieval_metadata, dict)
+        assert row.retrieval_metadata["run_id"] == "run-abc"
+
+    @pytest.mark.asyncio
+    async def test_reference_metadata_persisted_and_parsed(self):
+        session = MagicMock()
+        session.exec.return_value.all.return_value = []
+        added_rows = []
+        session.add_all.side_effect = lambda rows: added_rows.extend(rows)
+
+        with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
+             patch("src.utils.upsert_source", return_value=1), \
+             patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)):
+            result = await add_documents_to_db(
+                session,
+                ["https://x.com/page"],
+                ["content with refs"],
+                [{
+                    "source": "x.com",
+                    "references_markdown": "[1]: https://example.com/ref Example reference",
+                    "has_citations": True,
+                }],
+                [0],
+            )
+
+        assert result == 1
+        row = added_rows[0]
+        assert row.retrieval_metadata["has_citations"] is True
+        assert row.retrieval_metadata["has_link_references"] is True
+        assert row.retrieval_metadata["references_markdown"].startswith("[1]: https://example.com/ref")
+        assert row.retrieval_metadata["link_references"][0]["url"] == "https://example.com/ref"
 
     @pytest.mark.asyncio
     async def test_phase9_fields_default_when_metadata_absent(self):
@@ -1144,6 +1177,35 @@ class TestExtractCodeBlocks:
 
     def test_no_code_blocks(self):
         assert extract_code_blocks("just text") == []
+
+
+class TestExtractLinkReferences:
+    def test_empty_returns_empty(self):
+        assert extract_link_references("") == []
+
+    def test_markdown_reference_line(self):
+        refs = extract_link_references("[1]: https://example.com/ref Example reference")
+        assert refs == [{"label": "1", "url": "https://example.com/ref", "text": "Example reference"}]
+
+    def test_markdown_link_line(self):
+        refs = extract_link_references("1. [Example](https://example.com/ref)")
+        assert refs[0]["url"] == "https://example.com/ref"
+        assert refs[0]["text"] == "Example"
+
+    def test_plain_url_line(self):
+        refs = extract_link_references("2. https://example.com/ref plain reference")
+        assert refs[0]["label"] == "2"
+        assert refs[0]["url"] == "https://example.com/ref"
+
+    def test_plain_url_line_without_numeric_label(self):
+        refs = extract_link_references("See https://example.com/ref for details")
+        assert refs[0]["label"] == "1"
+        assert refs[0]["url"] == "https://example.com/ref"
+
+    def test_blank_lines_are_skipped(self):
+        refs = extract_link_references("\n\n[1]: https://example.com/ref Example reference")
+        assert len(refs) == 1
+        assert refs[0]["url"] == "https://example.com/ref"
 
 
 # ---------------------------------------------------------------------------

@@ -128,19 +128,33 @@ def _sentence_chunking(text: str, size: int, overlap: int) -> List[str]:
     return [c for c in chunks if c.strip()]
 
 
-async def chunk_text_according_to_settings(text: str) -> List[str]:
-    """Chunk text using the strategy and parameters from settings."""
+async def chunk_text_according_to_settings(text: str, strategy: Optional[str] = None) -> List[str]:
+    """Chunk text using the strategy and parameters from settings.
+
+    Args:
+        text: The text to chunk.
+        strategy: Optional override for the chunking strategy (``"paragraph"``,
+            ``"sentence"``, ``"fixed"``).  Falls back to the server-wide
+            ``settings.CHUNK_STRATEGY`` when omitted or invalid.
+    """
     if not text:
         return []
     size = settings.CHUNK_SIZE
     overlap = settings.CHUNK_OVERLAP
-    strategy = settings.CHUNK_STRATEGY
 
-    if strategy == ChunkStrategy.FIXED:
+    if strategy:
+        try:
+            effective_strategy = ChunkStrategy(strategy.lower())
+        except ValueError:
+            effective_strategy = settings.CHUNK_STRATEGY
+    else:
+        effective_strategy = settings.CHUNK_STRATEGY
+
+    if effective_strategy == ChunkStrategy.FIXED:
         return _fixed_char_chunking(text, size, overlap)
-    elif strategy == ChunkStrategy.SENTENCE:
+    elif effective_strategy == ChunkStrategy.SENTENCE:
         return _sentence_chunking(text, size, overlap)
-    elif strategy == ChunkStrategy.PARAGRAPH:
+    elif effective_strategy == ChunkStrategy.PARAGRAPH:
         return _paragraph_chunking(text, size, overlap)
     # Default fallback
     return _paragraph_chunking(text, size, overlap)

@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS crawled_pages (
     content_class TEXT NOT NULL DEFAULT 'text',
     is_active     BOOLEAN NOT NULL DEFAULT TRUE,
     crawl_timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    content_hash  TEXT,
+    content_hash  TEXT NOT NULL,
+    source_change_id TEXT,
     first_seen_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_crawled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -61,7 +62,8 @@ CREATE TABLE IF NOT EXISTS code_examples (
     content_class TEXT NOT NULL DEFAULT 'code',
     is_active     BOOLEAN NOT NULL DEFAULT TRUE,
     crawl_timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    content_hash  TEXT,
+    content_hash  TEXT NOT NULL,
+    source_change_id TEXT,
     first_seen_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_crawled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -88,6 +90,11 @@ CREATE TABLE IF NOT EXISTS source_policies (
     priority_weight        DOUBLE PRECISION NOT NULL DEFAULT 1.0,
     min_active_docs        INT NOT NULL DEFAULT 20,
     max_source_size_mb     INT,
+    retry_backoff_base_hours INT NOT NULL DEFAULT 2,
+    max_retry_backoff_hours  INT NOT NULL DEFAULT 168,
+    consecutive_failures     INT NOT NULL DEFAULT 0,
+    next_retry_at            TIMESTAMPTZ,
+    dead_page_failures_threshold INT NOT NULL DEFAULT 3,
     created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -104,6 +111,8 @@ CREATE TABLE IF NOT EXISTS storage_policies (
     hard_threshold          DOUBLE PRECISION NOT NULL DEFAULT 1.00,
     target_post_evict_ratio DOUBLE PRECISION NOT NULL DEFAULT 0.75,
     tombstone_grace_hours   INT NOT NULL DEFAULT 24,
+    max_crawled_pages_mb    INT,
+    max_code_examples_mb    INT,
     created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -128,6 +137,7 @@ ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS content_class TEXT NOT NULL D
 ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS crawl_timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS content_hash TEXT;
+ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS source_change_id TEXT;
 ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS retrieval_metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE crawled_pages ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
@@ -144,6 +154,7 @@ ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS content_class TEXT NOT NULL D
 ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS crawl_timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS content_hash TEXT;
+ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS source_change_id TEXT;
 ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS last_crawled_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
@@ -154,6 +165,20 @@ ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS staleness_score DOUBLE PRECIS
 ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS value_score DOUBLE PRECISION NOT NULL DEFAULT 0.0;
 ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS last_hit_at TIMESTAMPTZ;
 ALTER TABLE code_examples ADD COLUMN IF NOT EXISTS hit_count BIGINT NOT NULL DEFAULT 0;
+
+UPDATE crawled_pages SET content_hash = md5(content) WHERE content_hash IS NULL;
+UPDATE code_examples SET content_hash = md5(content) WHERE content_hash IS NULL;
+ALTER TABLE crawled_pages ALTER COLUMN content_hash SET NOT NULL;
+ALTER TABLE code_examples ALTER COLUMN content_hash SET NOT NULL;
+
+ALTER TABLE source_policies ADD COLUMN IF NOT EXISTS retry_backoff_base_hours INT NOT NULL DEFAULT 2;
+ALTER TABLE source_policies ADD COLUMN IF NOT EXISTS max_retry_backoff_hours INT NOT NULL DEFAULT 168;
+ALTER TABLE source_policies ADD COLUMN IF NOT EXISTS consecutive_failures INT NOT NULL DEFAULT 0;
+ALTER TABLE source_policies ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMPTZ;
+ALTER TABLE source_policies ADD COLUMN IF NOT EXISTS dead_page_failures_threshold INT NOT NULL DEFAULT 3;
+
+ALTER TABLE storage_policies ADD COLUMN IF NOT EXISTS max_crawled_pages_mb INT;
+ALTER TABLE storage_policies ADD COLUMN IF NOT EXISTS max_code_examples_mb INT;
 
 -- -----------------------------------------------------------------------
 -- Indexes
@@ -183,6 +208,9 @@ CREATE INDEX IF NOT EXISTS idx_crawled_pages_crawl_timestamp
 CREATE INDEX IF NOT EXISTS idx_crawled_pages_content_hash
     ON crawled_pages (content_hash);
 
+CREATE INDEX IF NOT EXISTS idx_crawled_pages_source_change_id
+    ON crawled_pages (source_change_id);
+
 CREATE INDEX IF NOT EXISTS idx_code_examples_embedding
     ON code_examples USING ivfflat (embedding vector_cosine_ops)
     WITH (lists = 100);
@@ -201,6 +229,9 @@ CREATE INDEX IF NOT EXISTS idx_code_examples_crawl_timestamp
 
 CREATE INDEX IF NOT EXISTS idx_code_examples_content_hash
     ON code_examples (content_hash);
+
+CREATE INDEX IF NOT EXISTS idx_code_examples_source_change_id
+    ON code_examples (source_change_id);
 
 CREATE INDEX IF NOT EXISTS idx_crawled_pages_tombstoned_at
     ON crawled_pages (tombstoned_at);

@@ -68,461 +68,46 @@ class TestGetCrawler:
 
 
 # ---------------------------------------------------------------------------
-# Tests: crawl_single_page
+# Tests: crawl_url + search_documents_v2
 # ---------------------------------------------------------------------------
 
-class TestCrawlSinglePage:
+class TestCrawlUrl:
     @pytest.mark.asyncio
-    async def test_missing_lifespan_returns_error_json(self):
-        ctx = MagicMock()
-        ctx.lifespan_context = None
-        result = await td.crawl_single_page(ctx, "https://x.com")
+    async def test_markdown_mode_dispatches(self):
+        ctx = _make_ctx()
+        with patch("src.crawler.tool_definitions.crawl_to_markdown", new_callable=AsyncMock, return_value='{"success": true}') as mock_md:
+            result = await td.crawl_url(ctx, url="https://x.com", mode="markdown", markdown_variant="fit")
+        data = json.loads(result)
+        assert data["success"] is True
+        mock_md.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_deep_mode_dispatches(self):
+        ctx = _make_ctx()
+        with patch("src.crawler.tool_definitions.crawl_deep", new_callable=AsyncMock, return_value='{"success": true, "pages_crawled": 1}') as mock_deep:
+            result = await td.crawl_url(ctx, url="https://x.com", mode="deep", max_depth=2)
+        data = json.loads(result)
+        assert data["success"] is True
+        mock_deep.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_removed_mode_returns_error(self):
+        ctx = _make_ctx()
+        result = await td.crawl_url(ctx, url="https://x.com", mode="legacy")
         data = json.loads(result)
         assert data["success"] is False
-        assert "error" in data
+        assert "removed" in data["error"]
 
     @pytest.mark.asyncio
-    async def test_crawl_failure_returns_error_json(self):
-        mock_crawler = AsyncMock()
-        mock_crawler.arun.return_value = MagicMock(success=False, markdown=None,
-                                                    error_message="Timeout")
-        ctx = _make_ctx(crawler=mock_crawler)
-        with patch("src.crawler.tool_definitions.chunk_text_according_to_settings",
-                   new_callable=AsyncMock, return_value=[]):
-            result = await td.crawl_single_page(ctx, "https://x.com")
+    async def test_invalid_mode_returns_error(self):
+        ctx = _make_ctx()
+        result = await td.crawl_url(ctx, url="https://x.com", mode="invalid")
         data = json.loads(result)
         assert data["success"] is False
+        assert "Invalid mode" in data["error"]
 
-    @pytest.mark.asyncio
-    async def test_success_no_agentic_rag(self):
-        mock_crawler = AsyncMock()
-        mock_crawler.arun.return_value = MagicMock(
-            success=True, markdown="# H\n\nContent.",
-            links={"internal": [], "external": []},
-        )
-        ctx = _make_ctx(crawler=mock_crawler)
 
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(patch("src.crawler.tool_definitions.settings",
-                                      MagicMock(USE_AGENTIC_RAG=False)))
-            stack.enter_context(patch("src.crawler.tool_definitions.get_session",
-                                      side_effect=_make_get_session()))
-            stack.enter_context(patch("src.crawler.tool_definitions.chunk_text_according_to_settings",
-                                      new_callable=AsyncMock, return_value=["# H\n\nContent."]))
-            stack.enter_context(patch("src.crawler.tool_definitions.add_documents_to_db",
-                                      new_callable=AsyncMock, return_value=1))
-            result = await td.crawl_single_page(ctx, "https://x.com/page")
-
-        data = json.loads(result)
-        assert data["success"] is True
-        assert data["chunks_stored"] == 1
-
-    @pytest.mark.asyncio
-    async def test_success_agentic_rag_with_code_blocks(self):
-        mock_crawler = AsyncMock()
-        mock_crawler.arun.return_value = MagicMock(
-            success=True, markdown="```python\np()\n```",
-            links={"internal": [], "external": []},
-        )
-        ctx = _make_ctx(crawler=mock_crawler)
-        code_blocks = [{"language": "python", "content": "p()"}]
-
-        # get_session is called twice (once for docs, once for code)
-
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(patch("src.crawler.tool_definitions.settings",
-                                      MagicMock(USE_AGENTIC_RAG=True)))
-            stack.enter_context(patch("src.crawler.tool_definitions.get_session",
-                                      side_effect=_make_get_session()))
-            stack.enter_context(patch("src.crawler.tool_definitions.chunk_text_according_to_settings",
-                                      new_callable=AsyncMock, return_value=["chunk"]))
-            stack.enter_context(patch("src.crawler.tool_definitions.add_documents_to_db",
-                                      new_callable=AsyncMock, return_value=1))
-            stack.enter_context(patch("src.crawler.tool_definitions.extract_code_blocks",
-                                      return_value=code_blocks))
-            mock_add_code_patch = stack.enter_context(
-                patch("src.crawler.tool_definitions.add_code_examples_to_db",
-                      new_callable=AsyncMock, return_value=1)
-            )
-            result = await td.crawl_single_page(ctx, "https://x.com/page")
-
-        data = json.loads(result)
-        assert data["success"] is True
-        mock_add_code_patch.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_agentic_rag_no_code_blocks_skips_add_code(self):
-        mock_crawler = AsyncMock()
-        mock_crawler.arun.return_value = MagicMock(
-            success=True, markdown="No code here.", links={},
-        )
-        ctx = _make_ctx(crawler=mock_crawler)
-
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(patch("src.crawler.tool_definitions.settings",
-                                      MagicMock(USE_AGENTIC_RAG=True)))
-            stack.enter_context(patch("src.crawler.tool_definitions.get_session",
-                                      side_effect=_make_get_session()))
-            stack.enter_context(patch("src.crawler.tool_definitions.chunk_text_according_to_settings",
-                                      new_callable=AsyncMock, return_value=["chunk"]))
-            stack.enter_context(patch("src.crawler.tool_definitions.add_documents_to_db",
-                                      new_callable=AsyncMock, return_value=1))
-            stack.enter_context(patch("src.crawler.tool_definitions.extract_code_blocks",
-                                      return_value=[]))
-            mock_add_code = stack.enter_context(
-                patch("src.crawler.tool_definitions.add_code_examples_to_db",
-                      new_callable=AsyncMock)
-            )
-            result = await td.crawl_single_page(ctx, "https://x.com/page")
-
-        data = json.loads(result)
-        assert data["success"] is True
-        mock_add_code.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# Tests: smart_crawl_url
-# ---------------------------------------------------------------------------
-
-def _scrawl_stack(stack, crawl_results, pages=1, chunks=1, extra_patches=None):
-    """Push the common smart_crawl_url patches onto the ExitStack."""
-    stack.enter_context(patch("src.crawler.tool_definitions.settings",
-                              MagicMock(USE_AGENTIC_RAG=False)))
-    stack.enter_context(patch("src.crawler.tool_definitions.get_session",
-                              side_effect=_make_get_session()))
-    stack.enter_context(patch("src.crawler.tool_definitions.store_crawled_documents",
-                              new_callable=AsyncMock, return_value=(pages, chunks)))
-    if extra_patches:
-        for p in extra_patches:
-            stack.enter_context(p)
-
-
-class TestSmartCrawlUrl:
-    @pytest.mark.asyncio
-    async def test_txt_url_uses_crawl_markdown_file(self):
-        ctx = _make_ctx()
-        crawl_results = [_make_crawl_result("https://x.com/data.txt")]
-
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(patch("src.crawler.tool_definitions.is_txt", return_value=True))
-            stack.enter_context(patch("src.crawler.tool_definitions.is_sitemap", return_value=False))
-            mock_cmf = stack.enter_context(
-                patch("src.crawler.tool_definitions.crawl_markdown_file",
-                      new_callable=AsyncMock, return_value=crawl_results)
-            )
-            _scrawl_stack(stack, crawl_results)
-            result = await td.smart_crawl_url(ctx, "https://x.com/data.txt")
-
-        data = json.loads(result)
-        assert data["success"] is True
-        assert data["crawl_type"] == "text_file"
-        mock_cmf.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_sitemap_with_urls(self):
-        ctx = _make_ctx()
-        sitemap_urls = ["https://x.com/p1", "https://x.com/p2"]
-        crawl_results = [_make_crawl_result(u) for u in sitemap_urls]
-
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(patch("src.crawler.tool_definitions.is_txt", return_value=False))
-            stack.enter_context(patch("src.crawler.tool_definitions.is_sitemap", return_value=True))
-            stack.enter_context(patch("src.crawler.tool_definitions.parse_sitemap",
-                                      new_callable=AsyncMock, return_value=sitemap_urls))
-            mock_batch = stack.enter_context(
-                patch("src.crawler.tool_definitions.crawl_batch",
-                      new_callable=AsyncMock, return_value=crawl_results)
-            )
-            _scrawl_stack(stack, crawl_results, pages=2, chunks=2)
-            result = await td.smart_crawl_url(ctx, "https://x.com/sitemap.xml")
-
-        data = json.loads(result)
-        assert data["success"] is True
-        assert data["crawl_type"] == "sitemap"
-        mock_batch.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_sitemap_no_urls_returns_error(self):
-        ctx = _make_ctx()
-
-        with patch("src.crawler.tool_definitions.is_txt", return_value=False), \
-             patch("src.crawler.tool_definitions.is_sitemap", return_value=True), \
-             patch("src.crawler.tool_definitions.parse_sitemap",
-                   new_callable=AsyncMock, return_value=[]):
-            result = await td.smart_crawl_url(ctx, "https://x.com/sitemap.xml")
-
-        data = json.loads(result)
-        assert data["success"] is False
-        assert "sitemap" in data["error"].lower()
-
-    @pytest.mark.asyncio
-    async def test_follow_links_uses_recursive_crawl(self):
-        ctx = _make_ctx()
-        crawl_results = [_make_crawl_result()]
-
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(patch("src.crawler.tool_definitions.is_txt", return_value=False))
-            stack.enter_context(patch("src.crawler.tool_definitions.is_sitemap", return_value=False))
-            mock_rec = stack.enter_context(
-                patch("src.crawler.tool_definitions.crawl_recursive_internal_links",
-                      new_callable=AsyncMock, return_value=crawl_results)
-            )
-            _scrawl_stack(stack, crawl_results)
-            result = await td.smart_crawl_url(ctx, "https://x.com",
-                                               follow_links=True, url_pattern=r"/docs/.*")
-
-        data = json.loads(result)
-        assert data["success"] is True
-        assert data["crawl_type"] == "webpage_recursive"
-        mock_rec.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_default_single_page_crawl(self):
-        ctx = _make_ctx()
-        crawl_results = [_make_crawl_result()]
-
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(patch("src.crawler.tool_definitions.is_txt", return_value=False))
-            stack.enter_context(patch("src.crawler.tool_definitions.is_sitemap", return_value=False))
-            mock_cmf = stack.enter_context(
-                patch("src.crawler.tool_definitions.crawl_markdown_file",
-                      new_callable=AsyncMock, return_value=crawl_results)
-            )
-            _scrawl_stack(stack, crawl_results)
-            result = await td.smart_crawl_url(ctx, "https://x.com/page")
-
-        data = json.loads(result)
-        assert data["success"] is True
-        assert data["crawl_type"] == "webpage_single"
-
-    @pytest.mark.asyncio
-    async def test_empty_crawl_results_returns_error(self):
-        ctx = _make_ctx()
-
-        with patch("src.crawler.tool_definitions.is_txt", return_value=False), \
-             patch("src.crawler.tool_definitions.is_sitemap", return_value=False), \
-             patch("src.crawler.tool_definitions.crawl_markdown_file",
-                   new_callable=AsyncMock, return_value=[]):
-            result = await td.smart_crawl_url(ctx, "https://x.com/page")
-
-        data = json.loads(result)
-        assert data["success"] is False
-        assert "No content" in data["error"]
-
-    @pytest.mark.asyncio
-    async def test_exception_returns_error_json(self):
-        ctx = _make_ctx()
-
-        with patch("src.crawler.tool_definitions.is_txt",
-                   side_effect=RuntimeError("boom")):
-            result = await td.smart_crawl_url(ctx, "https://x.com")
-
-        data = json.loads(result)
-        assert data["success"] is False
-        assert "boom" in data["error"]
-
-    @pytest.mark.asyncio
-    async def test_auto_mode_detects_recursive_from_follow_links(self):
-        ctx = _make_ctx()
-        crawl_results = [_make_crawl_result("https://x.com/p1")]
-
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(patch("src.crawler.tool_definitions.is_txt", return_value=False))
-            stack.enter_context(patch("src.crawler.tool_definitions.is_sitemap", return_value=False))
-            mock_rec = stack.enter_context(
-                patch("src.crawler.tool_definitions.crawl_recursive_internal_links",
-                      new_callable=AsyncMock, return_value=crawl_results)
-            )
-            _scrawl_stack(stack, crawl_results)
-            result = await td.smart_crawl_url(ctx, "https://x.com", follow_links=True)
-
-        data = json.loads(result)
-        assert data["success"] is True
-        assert data["requested_mode"] == "auto"
-        assert data["detected_strategy"] == "webpage_recursive"
-        assert data["adaptive_applied"] is True
-        mock_rec.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_explicit_single_mode_overrides_follow_links(self):
-        ctx = _make_ctx()
-        crawl_results = [_make_crawl_result("https://x.com/page")]
-
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(patch("src.crawler.tool_definitions.is_txt", return_value=False))
-            stack.enter_context(patch("src.crawler.tool_definitions.is_sitemap", return_value=False))
-            mock_single = stack.enter_context(
-                patch("src.crawler.tool_definitions.crawl_markdown_file",
-                      new_callable=AsyncMock, return_value=crawl_results)
-            )
-            mock_rec = stack.enter_context(
-                patch("src.crawler.tool_definitions.crawl_recursive_internal_links",
-                      new_callable=AsyncMock)
-            )
-            _scrawl_stack(stack, crawl_results)
-            result = await td.smart_crawl_url(
-                ctx,
-                "https://x.com/page",
-                follow_links=True,
-                crawl_mode="single",
-            )
-
-        data = json.loads(result)
-        assert data["success"] is True
-        assert data["requested_mode"] == "single"
-        assert data["detected_strategy"] == "webpage_single"
-        assert data["adaptive_applied"] is False
-        mock_single.assert_called_once()
-        mock_rec.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_invalid_mode_falls_back_to_auto(self):
-        ctx = _make_ctx()
-        crawl_results = [_make_crawl_result("https://x.com/page")]
-
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(patch("src.crawler.tool_definitions.is_txt", return_value=False))
-            stack.enter_context(patch("src.crawler.tool_definitions.is_sitemap", return_value=False))
-            stack.enter_context(patch("src.crawler.tool_definitions.crawl_markdown_file",
-                                      new_callable=AsyncMock, return_value=crawl_results))
-            _scrawl_stack(stack, crawl_results)
-            result = await td.smart_crawl_url(ctx, "https://x.com/page", crawl_mode="nonsense")
-
-        data = json.loads(result)
-        assert data["success"] is True
-        assert data["requested_mode"] == "auto"
-        assert data["detected_strategy"] == "webpage_single"
-        assert data["adaptive_applied"] is True
-
-    @pytest.mark.asyncio
-    async def test_explicit_mode_txt(self):
-        ctx = _make_ctx()
-        crawl_results = [_make_crawl_result("https://x.com/data.txt")]
-
-        with contextlib.ExitStack() as stack:
-            mock_cmf = stack.enter_context(
-                patch("src.crawler.tool_definitions.crawl_markdown_file",
-                      new_callable=AsyncMock, return_value=crawl_results)
-            )
-            _scrawl_stack(stack, crawl_results)
-            result = await td.smart_crawl_url(ctx, "https://x.com/data.txt", crawl_mode="txt")
-
-        data = json.loads(result)
-        assert data["success"] is True
-        assert data["requested_mode"] == "txt"
-        assert data["detected_strategy"] == "text_file"
-        mock_cmf.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_explicit_mode_sitemap(self):
-        ctx = _make_ctx()
-        sitemap_urls = ["https://x.com/p1", "https://x.com/p2"]
-        crawl_results = [_make_crawl_result(u) for u in sitemap_urls]
-
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(patch("src.crawler.tool_definitions.parse_sitemap",
-                                      new_callable=AsyncMock, return_value=sitemap_urls))
-            mock_batch = stack.enter_context(
-                patch("src.crawler.tool_definitions.crawl_batch",
-                      new_callable=AsyncMock, return_value=crawl_results)
-            )
-            _scrawl_stack(stack, crawl_results, pages=2, chunks=2)
-            result = await td.smart_crawl_url(ctx, "https://x.com/sitemap.xml", crawl_mode="sitemap")
-
-        data = json.loads(result)
-        assert data["success"] is True
-        assert data["requested_mode"] == "sitemap"
-        assert data["detected_strategy"] == "sitemap"
-        mock_batch.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_explicit_mode_recursive(self):
-        ctx = _make_ctx()
-        crawl_results = [_make_crawl_result("https://x.com/p1")]
-
-        with contextlib.ExitStack() as stack:
-            mock_rec = stack.enter_context(
-                patch("src.crawler.tool_definitions.crawl_recursive_internal_links",
-                      new_callable=AsyncMock, return_value=crawl_results)
-            )
-            _scrawl_stack(stack, crawl_results)
-            result = await td.smart_crawl_url(ctx, "https://x.com", crawl_mode="recursive")
-
-        data = json.loads(result)
-        assert data["success"] is True
-        assert data["requested_mode"] == "recursive"
-        assert data["detected_strategy"] == "webpage_recursive"
-        mock_rec.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_result_includes_urls_sample_truncated(self):
-        ctx = _make_ctx()
-        # 7 results → sample shows first 5 + "..."
-        crawl_results = [_make_crawl_result(f"https://x.com/{i}") for i in range(7)]
-
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(patch("src.crawler.tool_definitions.is_txt", return_value=False))
-            stack.enter_context(patch("src.crawler.tool_definitions.is_sitemap", return_value=False))
-            stack.enter_context(patch("src.crawler.tool_definitions.crawl_markdown_file",
-                                      new_callable=AsyncMock, return_value=crawl_results))
-            _scrawl_stack(stack, crawl_results, pages=7, chunks=7)
-            result = await td.smart_crawl_url(ctx, "https://x.com")
-
-        data = json.loads(result)
-        assert data["success"] is True
-        assert data["urls_crawled_sample"][-1] == "..."
-        assert len(data["urls_crawled_sample"]) == 6  # 5 + "..."
-
-    @pytest.mark.asyncio
-    async def test_crawler_not_initialized_returns_error_json(self):
-        ctx = MagicMock()
-        ctx.lifespan_context = None
-
-        result = await td.smart_crawl_url(ctx, "https://x.com")
-        data = json.loads(result)
-        assert data["success"] is False
-
-
-# ---------------------------------------------------------------------------
-# Tests: get_available_sources
-# ---------------------------------------------------------------------------
-
-class TestGetAvailableSources:
-    @pytest.mark.asyncio
-    async def test_success(self):
-        ctx = _make_ctx()
-
-        with patch("src.crawler.tool_definitions.get_session",
-                   side_effect=_make_get_session()), \
-             patch("src.crawler.tool_definitions.fetch_available_sources",
-                   return_value=["a.com", "b.com"]):
-            result = await td.get_available_sources(ctx)
-
-        data = json.loads(result)
-        assert data["success"] is True
-        assert data["sources"] == ["a.com", "b.com"]
-        assert data["count"] == 2
-
-    @pytest.mark.asyncio
-    async def test_exception_returns_error_json(self):
-        ctx = _make_ctx()
-
-        with patch("src.crawler.tool_definitions.get_session",
-                   side_effect=_make_get_session()), \
-             patch("src.crawler.tool_definitions.fetch_available_sources",
-                   side_effect=RuntimeError("db down")):
-            result = await td.get_available_sources(ctx)
-
-        data = json.loads(result)
-        assert data["success"] is False
-        assert "db down" in data["error"]
-
-
-# ---------------------------------------------------------------------------
-# Tests: perform_rag_query
-# ---------------------------------------------------------------------------
-
-class TestPerformRagQuery:
+class TestSearchDocumentsV2:
     @pytest.mark.asyncio
     async def test_basic_query_no_reranking(self):
         ctx = _make_ctx()
@@ -535,7 +120,7 @@ class TestPerformRagQuery:
              patch("src.crawler.tool_definitions.settings", MagicMock(USE_RERANKING=False)), \
              patch("src.crawler.tool_definitions.search_documents",
                    new_callable=AsyncMock, return_value=raw_results):
-            result = await td.perform_rag_query(ctx, "test query")
+            result = await td.search_documents_v2(ctx, "test query")
 
         data = json.loads(result)
         assert data["success"] is True
@@ -555,7 +140,7 @@ class TestPerformRagQuery:
                    side_effect=_make_get_session()), \
              patch("src.crawler.tool_definitions.settings", MagicMock(USE_RERANKING=False)), \
              patch("src.crawler.tool_definitions.search_documents", side_effect=fake_search):
-            await td.perform_rag_query(ctx, "q", source="docs.x.com")
+            await td.search_documents_v2(ctx, "q", source="docs.x.com")
 
         assert captured["filter"] == {"source": "docs.x.com"}
 
@@ -571,7 +156,7 @@ class TestPerformRagQuery:
         with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()), \
              patch("src.crawler.tool_definitions.settings", MagicMock(USE_RERANKING=False)), \
              patch("src.crawler.tool_definitions.search_documents", side_effect=fake_search):
-            await td.perform_rag_query(
+            await td.search_documents_v2(
                 ctx,
                 "q",
                 source="docs.x.com",
@@ -600,7 +185,7 @@ class TestPerformRagQuery:
                    side_effect=_make_get_session()), \
              patch("src.crawler.tool_definitions.settings", MagicMock(USE_RERANKING=False)), \
              patch("src.crawler.tool_definitions.search_documents", side_effect=fake_search):
-            await td.perform_rag_query(ctx, "q")
+            await td.search_documents_v2(ctx, "q")
 
         assert captured["filter"] is None
 
@@ -620,12 +205,43 @@ class TestPerformRagQuery:
                    new_callable=AsyncMock, return_value=raw_results), \
              patch("src.crawler.tool_definitions.rerank_results",
                    return_value=reranked) as mock_rerank:
-            result = await td.perform_rag_query(ctx, "q", match_count=2)
+            result = await td.search_documents_v2(ctx, "q", match_count=2)
 
         data = json.loads(result)
         assert data["success"] is True
         mock_rerank.assert_called_once_with("q", raw_results, top_k=2)
         assert data["results"][0]["url"] == "u2"
+
+    @pytest.mark.asyncio
+    async def test_include_provenance_adds_provenance_payload(self):
+        ctx = _make_ctx()
+        raw_results = [
+            {
+                "url": "u",
+                "content": "c",
+                "page_metadata": {
+                    "source": "docs.x.com",
+                    "url": "u",
+                    "source_type": "remote_url",
+                    "markdown_variant": "raw_markdown",
+                    "references_markdown": "[1]: https://example.com/ref Example reference",
+                    "link_references": [{"label": "1", "url": "https://example.com/ref", "text": "Example reference"}],
+                    "has_citations": True,
+                },
+                "similarity_score": 0.8,
+            }
+        ]
+
+        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()), \
+             patch("src.crawler.tool_definitions.settings", MagicMock(USE_RERANKING=False)), \
+             patch("src.crawler.tool_definitions.search_documents", new_callable=AsyncMock, return_value=raw_results):
+            result = await td.search_documents_v2(ctx, "test query", include_provenance=True)
+
+        data = json.loads(result)
+        provenance = data["results"][0]["provenance"]
+        assert provenance["source"] == "docs.x.com"
+        assert provenance["has_citations"] is True
+        assert provenance["link_references"][0]["url"] == "https://example.com/ref"
 
     @pytest.mark.asyncio
     async def test_exception_returns_error_json(self):
@@ -636,11 +252,67 @@ class TestPerformRagQuery:
              patch("src.crawler.tool_definitions.settings", MagicMock(USE_RERANKING=False)), \
              patch("src.crawler.tool_definitions.search_documents",
                    side_effect=RuntimeError("search crash")):
-            result = await td.perform_rag_query(ctx, "q")
+            result = await td.search_documents_v2(ctx, "q")
 
         data = json.loads(result)
         assert data["success"] is False
         assert "search crash" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_fresh_only_filters_stale_and_expired_results(self):
+        ctx = _make_ctx()
+        raw_results = [
+            {
+                "url": "fresh",
+                "content": "fresh",
+                "page_metadata": {"staleness_score": 0.1, "expires_at": "2999-01-01T00:00:00+00:00"},
+                "similarity_score": 0.9,
+            },
+            {
+                "url": "stale",
+                "content": "stale",
+                "page_metadata": {"staleness_score": 0.9, "expires_at": "2999-01-01T00:00:00+00:00"},
+                "similarity_score": 0.95,
+            },
+        ]
+
+        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()), \
+             patch("src.crawler.tool_definitions.settings", MagicMock(USE_RERANKING=False)), \
+             patch("src.crawler.tool_definitions.search_documents", new_callable=AsyncMock, return_value=raw_results):
+            result = await td.search_documents_v2(ctx, "q", fresh_only=True, staleness_threshold=0.5)
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert len(data["results"]) == 1
+        assert data["results"][0]["url"] == "fresh"
+
+    @pytest.mark.asyncio
+    async def test_as_of_and_recency_bias_fields_present(self):
+        ctx = _make_ctx()
+        raw_results = [
+            {
+                "url": "u",
+                "content": "c",
+                "page_metadata": {"crawl_timestamp": "2026-01-01T00:00:00+00:00", "staleness_score": 0.2},
+                "similarity_score": 0.8,
+            }
+        ]
+
+        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()), \
+             patch("src.crawler.tool_definitions.settings", MagicMock(USE_RERANKING=False)), \
+             patch("src.crawler.tool_definitions.search_documents", new_callable=AsyncMock, return_value=raw_results):
+            result = await td.search_documents_v2(
+                ctx,
+                "q",
+                as_of="2027-01-01T00:00:00+00:00",
+                recency_bias=0.5,
+            )
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["recency_bias"] == 0.5
+        assert "final_score" in data["results"][0]
+        assert "freshness_score" in data["results"][0]
 
 
 # ---------------------------------------------------------------------------
@@ -844,8 +516,10 @@ class TestPreviewEvictionPlan:
             call_n[0] += 1
             m = MagicMock()
             if call_n[0] == 1:
-                m.all.return_value = [page]  # CrawledPage
+                m.all.return_value = []      # SourcePolicy
             elif call_n[0] == 2:
+                m.all.return_value = [page]  # CrawledPage
+            elif call_n[0] == 3:
                 m.all.return_value = []      # CodeExample
             else:
                 m.all.return_value = []
@@ -863,6 +537,7 @@ class TestPreviewEvictionPlan:
         assert data["dry_run"] is True
         assert data["candidates_count"] == 1
         assert data["total_evicted"] == 0
+        assert "last_seen_at" in data["candidates"][0]
 
     @pytest.mark.asyncio
     async def test_not_dry_run_tombstones_pages(self):
@@ -875,8 +550,10 @@ class TestPreviewEvictionPlan:
             call_n[0] += 1
             m = MagicMock()
             if call_n[0] == 1:
-                m.all.return_value = [page]  # CrawledPage
+                m.all.return_value = []      # SourcePolicy
             elif call_n[0] == 2:
+                m.all.return_value = [page]  # CrawledPage
+            elif call_n[0] == 3:
                 m.all.return_value = []      # CodeExample
             else:
                 m.all.return_value = []
@@ -909,8 +586,10 @@ class TestPreviewEvictionPlan:
             call_n[0] += 1
             m = MagicMock()
             if call_n[0] == 1:
-                m.all.return_value = []      # CrawledPage — empty
+                m.all.return_value = []      # SourcePolicy
             elif call_n[0] == 2:
+                m.all.return_value = []      # CrawledPage — empty
+            elif call_n[0] == 3:
                 m.all.return_value = [code]  # CodeExample — one record
             else:
                 m.all.return_value = []
@@ -940,8 +619,10 @@ class TestPreviewEvictionPlan:
             call_n[0] += 1
             m = MagicMock()
             if call_n[0] == 1:
-                m.all.return_value = [p_match, p_other]  # CrawledPage
+                m.all.return_value = []                  # SourcePolicy
             elif call_n[0] == 2:
+                m.all.return_value = [p_match, p_other]  # CrawledPage
+            elif call_n[0] == 3:
                 m.all.return_value = []                  # CodeExample
             else:
                 m.all.return_value = []
@@ -1012,6 +693,8 @@ class TestEnforceStorageBudget:
             m = MagicMock()
             if call_n[0] == 1:
                 m.first.return_value = policy  # custom StoragePolicy
+            elif call_n[0] == 2:
+                m.all.return_value = []        # SourcePolicy
             else:
                 m.all.return_value = []
             return m
@@ -1048,6 +731,12 @@ class TestEnforceStorageBudget:
 
         with patch("src.crawler.tool_definitions.get_session",
                    side_effect=_make_get_session(session)), \
+             patch("src.crawler.tool_definitions._apply_hard_ttl_delete",
+                 return_value={"crawled_pages": 0, "code_examples": 0}), \
+             patch("src.crawler.tool_definitions._enforce_source_quotas",
+                 return_value={"quota_evicted": 0, "sources_over_quota": []}), \
+             patch("src.crawler.tool_definitions._enforce_table_budgets",
+                 return_value={"crawled_pages": 0, "code_examples": 0}), \
              patch("src.crawler.tool_definitions._get_db_size_bytes",
                    return_value=1_000_000):
             result = await td.enforce_storage_budget(ctx, force=True)
@@ -1071,8 +760,10 @@ class TestEnforceStorageBudget:
             if call_n[0] == 1:
                 m.first.return_value = None      # StoragePolicy
             elif call_n[0] == 2:
-                m.all.return_value = [expired_rec]  # CrawledPage expired
+                m.all.return_value = []      # SourcePolicy
             elif call_n[0] == 3:
+                m.all.return_value = [expired_rec]  # CrawledPage expired
+            elif call_n[0] == 4:
                 m.all.return_value = []             # CodeExample expired
             else:
                 m.all.return_value = []
@@ -1082,6 +773,12 @@ class TestEnforceStorageBudget:
 
         with patch("src.crawler.tool_definitions.get_session",
                    side_effect=_make_get_session(session)), \
+             patch("src.crawler.tool_definitions._apply_hard_ttl_delete",
+                 return_value={"crawled_pages": 0, "code_examples": 0}), \
+             patch("src.crawler.tool_definitions._enforce_source_quotas",
+                 return_value={"quota_evicted": 0, "sources_over_quota": []}), \
+             patch("src.crawler.tool_definitions._enforce_table_budgets",
+                 return_value={"crawled_pages": 0, "code_examples": 0}), \
              patch("src.crawler.tool_definitions._get_db_size_bytes",
                    return_value=1_000_000):
             result = await td.enforce_storage_budget(ctx, force=True)
@@ -1102,11 +799,13 @@ class TestEnforceStorageBudget:
             m = MagicMock()
             if call_n[0] == 1:
                 m.first.return_value = None      # StoragePolicy
-            elif call_n[0] in (2, 3):
+            elif call_n[0] == 2:
+                m.all.return_value = []          # SourcePolicy
+            elif call_n[0] in (3, 4):
                 m.all.return_value = []          # compact: no expired
-            elif call_n[0] == 4:
-                m.all.return_value = [stale_rec] # high: stale CrawledPage
             elif call_n[0] == 5:
+                m.all.return_value = [stale_rec] # high: stale CrawledPage
+            elif call_n[0] == 6:
                 m.all.return_value = []          # high: stale CodeExample
             else:
                 m.all.return_value = []
@@ -1120,6 +819,12 @@ class TestEnforceStorageBudget:
 
         with patch("src.crawler.tool_definitions.get_session",
                    side_effect=_make_get_session(session)), \
+             patch("src.crawler.tool_definitions._apply_hard_ttl_delete",
+                 return_value={"crawled_pages": 0, "code_examples": 0}), \
+             patch("src.crawler.tool_definitions._enforce_source_quotas",
+                 return_value={"quota_evicted": 0, "sources_over_quota": []}), \
+             patch("src.crawler.tool_definitions._enforce_table_budgets",
+                 return_value={"crawled_pages": 0, "code_examples": 0}), \
              patch("src.crawler.tool_definitions._get_db_size_bytes",
                    return_value=high_usage), \
              patch("src.crawler.tool_definitions.tombstone_records",
@@ -1142,13 +847,19 @@ class TestEnforceStorageBudget:
             m = MagicMock()
             if call_n[0] == 1:
                 m.first.return_value = None      # StoragePolicy
-            elif call_n[0] in (2, 3):
+            elif call_n[0] == 2:
+                m.all.return_value = []          # SourcePolicy
+            elif call_n[0] in (3, 4):
                 m.all.return_value = []          # compact: no expired
-            elif call_n[0] in (4, 5):
+            elif call_n[0] in (5, 6):
                 m.all.return_value = []          # high: no stale
-            elif call_n[0] == 6:
-                m.all.return_value = [low_val_rec]  # hard: low-value CrawledPage
             elif call_n[0] == 7:
+                m.all.return_value = [low_val_rec]  # coverage map: active CrawledPage
+            elif call_n[0] == 8:
+                m.all.return_value = []          # coverage map: active CodeExample
+            elif call_n[0] == 9:
+                m.all.return_value = [low_val_rec]  # hard: low-value CrawledPage
+            elif call_n[0] == 10:
                 m.all.return_value = []          # hard: low-value CodeExample
             else:
                 m.all.return_value = []
@@ -1172,6 +883,107 @@ class TestEnforceStorageBudget:
         assert data["success"] is True
         assert data["pressure_level"] == "critical"
         assert mock_ts.call_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_hard_pressure_value_evicts_code_examples_branch(self):
+        """Covers hard-pressure code_ids tombstone path."""
+        ctx = _make_ctx()
+        low_val_code = _make_mock_code(uid=88, value_score=0.01, is_pinned=False)
+
+        call_n = [0]
+
+        def exec_se(stmt):
+            call_n[0] += 1
+            m = MagicMock()
+            if call_n[0] == 1:
+                m.first.return_value = None      # StoragePolicy
+            elif call_n[0] == 2:
+                m.all.return_value = []          # SourcePolicy
+            elif call_n[0] in (3, 4):
+                m.all.return_value = []          # compact: no expired
+            elif call_n[0] in (5, 6):
+                m.all.return_value = []          # high: no stale
+            elif call_n[0] == 7:
+                m.all.return_value = []          # coverage map: active CrawledPage
+            elif call_n[0] == 8:
+                m.all.return_value = [low_val_code]  # coverage map: active CodeExample
+            elif call_n[0] == 9:
+                m.all.return_value = []          # hard: low-value CrawledPage
+            elif call_n[0] == 10:
+                m.all.return_value = [low_val_code]  # hard: low-value CodeExample
+            else:
+                m.all.return_value = []
+            return m
+
+        session = MagicMock()
+        session.exec.side_effect = exec_se
+
+        over = int(1.05 * 10.0 * 1024 ** 3)
+
+        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)), \
+             patch("src.crawler.tool_definitions._get_db_size_bytes", return_value=over), \
+             patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts:
+            result = await td.enforce_storage_budget(ctx)
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["pressure_level"] == "critical"
+        # Ensure the code_examples branch is exercised.
+        assert any(call.args[2] == "code_examples" for call in mock_ts.mock_calls)
+
+    @pytest.mark.asyncio
+    async def test_hard_pressure_builds_candidates_and_tombstones_both_tables(self):
+        ctx = _make_ctx()
+        page_candidate = _make_mock_page(uid=101, source="docs.example.com", value_score=0.01)
+        code_candidate = _make_mock_code(uid=102, source="docs.example.com", value_score=0.02)
+        code_candidate.page_metadata = None
+
+        call_n = [0]
+
+        def exec_se(_stmt):
+            call_n[0] += 1
+            m = MagicMock()
+            if call_n[0] == 1:
+                m.first.return_value = None  # StoragePolicy
+            elif call_n[0] == 2:
+                m.all.return_value = []      # SourcePolicy
+            elif call_n[0] in (3, 4):
+                m.all.return_value = []      # compact queries
+            elif call_n[0] in (5, 6):
+                m.all.return_value = []      # high-pressure stale queries
+            elif call_n[0] == 7:
+                m.all.return_value = [page_candidate]  # hard candidates: pages
+            elif call_n[0] == 8:
+                m.all.return_value = [code_candidate]  # hard candidates: code
+            else:
+                m.all.return_value = []
+            return m
+
+        session = MagicMock()
+        session.exec.side_effect = exec_se
+
+        over = int(1.05 * 10.0 * 1024 ** 3)
+        selected = [
+            {"table": "crawled_pages", "id": 101},
+            {"table": "code_examples", "id": 102},
+        ]
+
+        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)), \
+             patch("src.crawler.tool_definitions._get_db_size_bytes", return_value=over), \
+               patch("src.crawler.tool_definitions._apply_hard_ttl_delete", return_value={"crawled_pages": 0, "code_examples": 0}), \
+               patch("src.crawler.tool_definitions._enforce_source_quotas", return_value={"quota_evicted": 0, "sources_over_quota": []}), \
+               patch("src.crawler.tool_definitions._enforce_table_budgets", return_value={"crawled_pages": 0, "code_examples": 0}), \
+             patch("src.crawler.tool_definitions._build_active_coverage_maps", return_value=({}, {})), \
+             patch("src.crawler.tool_definitions._apply_eviction_safeguards", return_value=selected), \
+             patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts:
+            result = await td.enforce_storage_budget(ctx)
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["pressure_level"] == "critical"
+        called_tables = [c.args[2] for c in mock_ts.mock_calls]
+        assert "crawled_pages" in called_tables
+        assert "code_examples" in called_tables
 
     @pytest.mark.asyncio
     async def test_exception_returns_error_json(self):
@@ -1553,14 +1365,14 @@ class TestRecrawlDueSources:
         session.exec.return_value.all.return_value = []
 
         with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)), \
-             patch("src.crawler.tool_definitions.smart_crawl_url", new_callable=AsyncMock) as mock_scrawl:
+               patch("src.crawler.tool_definitions.crawl_to_markdown", new_callable=AsyncMock) as mock_crawl:
             result = await td.recrawl_due_sources(ctx)
 
         data = json.loads(result)
         assert data["success"] is True
         assert data["due_count"] == 0
         assert data["recrawled_count"] == 0
-        mock_scrawl.assert_not_called()
+        mock_crawl.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_due_source_recrawls_successfully(self):
@@ -1577,17 +1389,17 @@ class TestRecrawlDueSources:
 
         with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)), \
              patch(
-                 "src.crawler.tool_definitions.smart_crawl_url",
+                 "src.crawler.tool_definitions.crawl_to_markdown",
                  new_callable=AsyncMock,
                  return_value=json.dumps({"success": True, "pages_crawled": 1}),
-             ) as mock_scrawl:
+             ) as mock_crawl:
             result = await td.recrawl_due_sources(ctx, max_concurrent=3)
 
         data = json.loads(result)
         assert data["success"] is True
         assert data["due_count"] == 1
         assert data["recrawled_count"] == 1
-        mock_scrawl.assert_awaited_once()
+        mock_crawl.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_not_due_source_skipped(self):
@@ -1603,14 +1415,14 @@ class TestRecrawlDueSources:
         )
 
         with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)), \
-             patch("src.crawler.tool_definitions.smart_crawl_url", new_callable=AsyncMock) as mock_scrawl:
+               patch("src.crawler.tool_definitions.crawl_to_markdown", new_callable=AsyncMock) as mock_crawl:
             result = await td.recrawl_due_sources(ctx)
 
         data = json.loads(result)
         assert data["success"] is True
         assert data["due_count"] == 0
         assert data["recrawled_count"] == 0
-        mock_scrawl.assert_not_called()
+        mock_crawl.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_source_filter_and_naive_timestamp(self):
@@ -1631,17 +1443,17 @@ class TestRecrawlDueSources:
 
         with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)), \
              patch(
-                 "src.crawler.tool_definitions.smart_crawl_url",
+                 "src.crawler.tool_definitions.crawl_to_markdown",
                  new_callable=AsyncMock,
                  return_value=json.dumps({"success": True, "pages_crawled": 1}),
-             ) as mock_scrawl:
+             ) as mock_crawl:
             result = await td.recrawl_due_sources(ctx, source="target.com")
 
         data = json.loads(result)
         assert data["success"] is True
         assert data["due_count"] == 1
         assert data["recrawled_count"] == 1
-        mock_scrawl.assert_awaited_once()
+        mock_crawl.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_missing_last_crawled_marks_due(self):
@@ -1657,7 +1469,7 @@ class TestRecrawlDueSources:
 
         with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)), \
              patch(
-                 "src.crawler.tool_definitions.smart_crawl_url",
+                 "src.crawler.tool_definitions.crawl_to_markdown",
                  new_callable=AsyncMock,
                  return_value=json.dumps({"success": True, "pages_crawled": 1}),
              ):
@@ -1683,7 +1495,7 @@ class TestRecrawlDueSources:
 
         with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)), \
              patch(
-                 "src.crawler.tool_definitions.smart_crawl_url",
+                 "src.crawler.tool_definitions.crawl_to_markdown",
                  new_callable=AsyncMock,
                  return_value=json.dumps({"success": False, "error": "crawl failed"}),
              ):
@@ -1707,6 +1519,103 @@ class TestRecrawlDueSources:
         data = json.loads(result)
         assert data["success"] is False
         assert "recrawl query failed" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_backoff_skips_source_until_retry_time(self):
+        ctx = _make_ctx()
+        policy = MagicMock()
+        policy.source = "example.com"
+        policy.recrawl_interval_hours = 1
+        policy.next_retry_at = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+
+        session = MagicMock()
+        session.exec.return_value.all.return_value = [policy]
+
+        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)), \
+             patch("src.crawler.tool_definitions.crawl_to_markdown", new_callable=AsyncMock) as mock_crawl:
+            result = await td.recrawl_due_sources(ctx)
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["backoff_skipped_count"] == 1
+        mock_crawl.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_dead_page_failure_tombstones_source_records(self):
+        ctx = _make_ctx()
+        policy = MagicMock()
+        policy.source = "example.com"
+        policy.recrawl_interval_hours = 1
+        policy.next_retry_at = None
+        policy.consecutive_failures = 0
+        policy.retry_backoff_base_hours = 2
+        policy.max_retry_backoff_hours = 24
+
+        page = _make_mock_page(uid=7, source="example.com")
+        code = _make_mock_code(uid=8, source="example.com")
+
+        call_n = [0]
+        session = MagicMock()
+
+        def exec_se(_stmt):
+            call_n[0] += 1
+            m = MagicMock()
+            if call_n[0] == 1:
+                m.all.return_value = [policy]  # source policies
+            elif call_n[0] == 2:
+                m.all.return_value = [page]  # active pages for dead-page policy
+            elif call_n[0] == 3:
+                m.all.return_value = [code]  # active code rows for dead-page policy
+            else:
+                m.all.return_value = []
+            return m
+
+        session.exec.side_effect = exec_se
+        session.execute.return_value.first.return_value = (
+            datetime.now(timezone.utc) - timedelta(hours=8),
+        )
+
+        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)), \
+             patch(
+                 "src.crawler.tool_definitions.crawl_to_markdown",
+                 new_callable=AsyncMock,
+                 return_value=json.dumps({"success": False, "error": "HTTP 404 not found"}),
+             ), \
+             patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts:
+            result = await td.recrawl_due_sources(ctx)
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["dead_page_tombstoned"] >= 1
+        assert data["failed_count"] == 1
+        assert mock_ts.call_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_crawl_exception_updates_backoff(self):
+        ctx = _make_ctx()
+        policy = MagicMock()
+        policy.source = "example.com"
+        policy.recrawl_interval_hours = 1
+        policy.next_retry_at = None
+        policy.consecutive_failures = 0
+        policy.retry_backoff_base_hours = 2
+        policy.max_retry_backoff_hours = 24
+
+        session = MagicMock()
+        session.exec.return_value.all.return_value = [policy]
+        session.execute.return_value.first.return_value = (
+            datetime.now(timezone.utc) - timedelta(hours=3),
+        )
+
+        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)), \
+             patch("src.crawler.tool_definitions.crawl_to_markdown", new_callable=AsyncMock, side_effect=RuntimeError("network down")):
+            result = await td.recrawl_due_sources(ctx)
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["failed_count"] == 1
+        assert int(policy.consecutive_failures) == 1
+        assert policy.next_retry_at is not None
 
 
 class TestPruneStaleContent:
@@ -1755,14 +1664,20 @@ class TestPruneStaleContent:
             if call_n[0] == 1:
                 m.first.return_value = policy
             elif call_n[0] == 2:
-                m.all.return_value = [rec1, rec2]
+                m.all.return_value = []  # source policies
+            elif call_n[0] == 3:
+                m.all.return_value = [rec1, rec2]  # crawled pages
             else:
                 m.all.return_value = [rec3]
             return m
         session.exec.side_effect = exec_se
 
         with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
-            result = await td.prune_stale_content(ctx, force=True)
+            with patch(
+                "src.crawler.tool_definitions._apply_hard_ttl_delete",
+                return_value={"crawled_pages": 0, "code_examples": 0},
+            ):
+                result = await td.prune_stale_content(ctx, force=True)
 
         data = json.loads(result)
         assert data["success"] is True
@@ -1848,3 +1763,852 @@ class TestHardDeleteTombstones:
         data = json.loads(result)
         assert data["success"] is False
         assert "hard delete failed" in data["error"]
+
+
+class TestPhase4StructuredExtraction:
+    @pytest.mark.asyncio
+    async def test_generate_schema_validates_and_caches(self, tmp_path):
+        ctx = _make_ctx()
+        with patch("src.crawler.tool_definitions._SCHEMA_CACHE_DIR", tmp_path):
+            result = await td.generate_extraction_schema(
+                ctx,
+                sample_html="<html><head><title>X</title></head><body><h1>H</h1><p>P</p><a href='https://x.com'>L</a></body></html>",
+                strategy="css",
+                cache_schema=True,
+            )
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["validation"]["valid"] is True
+        assert data["cached"] is True
+        assert os.path.exists(data["cache_path"])
+        assert len(data["schema"]["fields"]) >= 1
+
+    @pytest.mark.asyncio
+    async def test_generate_schema_requires_non_empty_html(self):
+        ctx = _make_ctx()
+        result = await td.generate_extraction_schema(ctx, sample_html="   ")
+        data = json.loads(result)
+        assert data["success"] is False
+
+    def test_build_schema_fallback_and_xpath_mode(self):
+        schema = td._build_schema_from_sample_html("<div>No known tags</div>", strategy="xpath")
+        assert schema["fields"][0]["xpath"] == "//body"
+
+    def test_validate_generated_schema_invalid_strategy_and_fields(self):
+        bad_strategy = td._validate_generated_schema({"fields": []}, strategy="regex")
+        assert bad_strategy["valid"] is False
+
+        bad_fields = td._validate_generated_schema({"fields": [{}]}, strategy="css")
+        assert bad_fields["valid"] is False
+        assert bad_fields["errors"]
+
+        bad_schema_type = td._validate_generated_schema("not-a-dict", strategy="css")
+        assert bad_schema_type["valid"] is False
+
+        bad_fields_shape = td._validate_generated_schema({"fields": []}, strategy="css")
+        assert bad_fields_shape["valid"] is False
+
+        bad_field_type = td._validate_generated_schema({"fields": [123]}, strategy="css")
+        assert bad_field_type["valid"] is False
+
+    @pytest.mark.asyncio
+    async def test_validate_extraction_schema_tool(self):
+        ctx = _make_ctx()
+        result = await td.validate_extraction_schema(
+            ctx,
+            schema={"fields": [{"name": "title", "selector": "h1", "type": "text"}]},
+            strategy="css",
+        )
+        data = json.loads(result)
+        assert data["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_extract_structured_json_fit_markdown_regex(self):
+        ctx = _make_ctx()
+        result = await td.extract_structured_json(
+            ctx,
+            extraction_strategy="regex",
+            extraction_schema={"emails": r"[A-Z"},  # invalid regex branch -> []
+            fit_markdown="Contact: user@example.com",
+        )
+        data = json.loads(result)
+        assert data["success"] is True
+        normalized = data["normalized_output"]
+        assert normalized["source"]["type"] == "fit_markdown"
+        assert normalized["source"]["fit_source_used"] is True
+
+    @pytest.mark.asyncio
+    async def test_extract_structured_json_fit_markdown_non_regex_rejected(self):
+        ctx = _make_ctx()
+        result = await td.extract_structured_json(
+            ctx,
+            extraction_strategy="css",
+            fit_markdown="# heading",
+        )
+        data = json.loads(result)
+        assert data["success"] is False
+
+    @pytest.mark.asyncio
+    async def test_extract_structured_json_normalized_output_from_crawl_payload(self):
+        ctx = _make_ctx()
+        with patch(
+            "src.crawler.tool_definitions.crawl_to_markdown",
+            new_callable=AsyncMock,
+            return_value=json.dumps({"success": True, "extraction_result": [{"title": "Example"}]}),
+        ) as mock_crawl:
+            result = await td.extract_structured_json(
+                ctx,
+                url="https://example.com",
+                extraction_strategy="css",
+                extraction_schema={"fields": [{"name": "title", "selector": "h1", "type": "text"}]},
+                fit_source=True,
+            )
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["normalized_output"]["extraction"]["record_count"] == 1
+        assert data["normalized_output"]["source"]["fit_source_used"] is True
+        assert mock_crawl.await_args.kwargs["content_source"] == "fit_html"
+
+    def test_normalize_extraction_records_scalars_and_dict(self):
+        assert td._normalize_extraction_records(None) == []
+        assert td._normalize_extraction_records({"a": 1}) == [{"a": 1}]
+        assert td._normalize_extraction_records(["x"]) == [{"value": "x"}]
+        assert td._normalize_extraction_records("value") == [{"value": "value"}]
+
+    def test_flatten_structured_content_none_and_empty_scalar(self):
+        assert td._flatten_structured_content(None) == []
+        assert td._flatten_structured_content("   ") == []
+
+    def test_project_structured_content_modes(self):
+        content = {"title": "X", "tags": ["a", "b"]}
+
+        raw_text, raw_meta = td._project_structured_content(content, "raw_json")
+        assert "title" in raw_text
+        assert raw_meta["projection_mode"] == "raw_json"
+
+        flat_text, flat_meta = td._project_structured_content(content, "flattened_text")
+        assert "title=X" in flat_text
+        assert flat_meta["projection_mode"] == "flattened_text"
+        assert "raw_json" in flat_meta
+
+        hybrid_text, hybrid_meta = td._project_structured_content(content, "not_a_mode")
+        assert hybrid_meta["projection_mode"] == "hybrid"
+        assert hybrid_meta["indexing_model"] == "hybrid_json_vector_v1"
+        assert hybrid_text
+
+    @pytest.mark.asyncio
+    async def test_index_structured_content_forwards_projection_metadata(self):
+        ctx = _make_ctx()
+        with patch(
+            "src.crawler.tool_definitions.index_markdown",
+            new_callable=AsyncMock,
+            return_value=json.dumps({"success": True, "chunks_stored": 1}),
+        ) as mock_index:
+            result = await td.index_structured_content(
+                ctx,
+                url="https://example.com/structured",
+                structured_content={"k": "v"},
+                projection_mode="hybrid",
+            )
+
+        data = json.loads(result)
+        assert data["success"] is True
+        metadata = mock_index.await_args.kwargs["metadata"]
+        assert metadata["content_class"] == "structured"
+        assert metadata["projection_mode"] == "hybrid"
+        assert metadata["indexing_model"] == "hybrid_json_vector_v1"
+
+    @pytest.mark.asyncio
+    async def test_extract_structured_json_returns_upstream_failure_payload(self):
+        ctx = _make_ctx()
+        with patch(
+            "src.crawler.tool_definitions.crawl_to_markdown",
+            new_callable=AsyncMock,
+            return_value=json.dumps({"success": False, "error": "upstream crawl failed"}),
+        ):
+            result = await td.extract_structured_json(
+                ctx,
+                url="https://example.com",
+                extraction_strategy="css",
+            )
+        data = json.loads(result)
+        assert data["success"] is False
+        assert "upstream crawl failed" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_generate_schema_invalid_strategy_path(self):
+        ctx = _make_ctx()
+        result = await td.generate_extraction_schema(
+            ctx,
+            sample_html="<html><body><h1>x</h1></body></html>",
+            strategy="regex",
+        )
+        data = json.loads(result)
+        assert data["success"] is False
+
+    @pytest.mark.asyncio
+    async def test_cache_schema_name_without_extension_gets_json_suffix(self, tmp_path):
+        with patch("src.crawler.tool_definitions._SCHEMA_CACHE_DIR", tmp_path):
+            cache_path = td._cache_generated_schema(
+                schema={"fields": [{"name": "title", "selector": "h1", "type": "text"}]},
+                sample_html="<h1>x</h1>",
+                strategy="css",
+                schema_name="my_schema",
+            )
+        assert cache_path.endswith(".json")
+
+
+class TestPhase9FreshnessAndSafeguards:
+    def test_extract_source_change_id_from_headers(self):
+        result = MagicMock()
+        result.response_headers = {"ETag": "abc123"}
+        assert td._extract_source_change_id(result) == "etag:abc123"
+
+        result.response_headers = {"Last-Modified": "Sat, 01 Jan 2026 00:00:00 GMT"}
+        assert td._extract_source_change_id(result).startswith("last-modified:")
+
+    def test_extract_source_change_id_fallback_and_none(self):
+        result = MagicMock()
+        result.response_headers = None
+        result.headers = {"ETag": "xyz"}
+        assert td._extract_source_change_id(result) == "etag:xyz"
+
+        result.headers = None
+        assert td._extract_source_change_id(result) is None
+
+        result.response_headers = {"X-Custom": "value"}
+        assert td._extract_source_change_id(result) is None
+
+    def test_canonical_url_key_drops_fragment(self):
+        key = td._canonical_url_key("https://example.com/docs/page?a=1#section-2")
+        assert key == "https://example.com/docs/page?a=1"
+
+    def test_canonical_url_key_handles_blank_and_relative(self):
+        assert td._canonical_url_key("   ") == ""
+        assert td._canonical_url_key("/docs/page#frag") == "/docs/page"
+
+    def test_is_result_fresh_as_of_without_fresh_only(self):
+        metadata = {
+            "staleness_score": 0.99,
+            "expires_at": "2000-01-01T00:00:00+00:00",
+            "crawl_timestamp": "2025-01-01T00:00:00+00:00",
+        }
+        # With require_fresh=False, staleness/expiry are ignored; only as_of matters.
+        assert td._is_result_fresh(
+            metadata,
+            staleness_threshold=0.1,
+            as_of_dt=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            require_fresh=False,
+        ) is True
+
+    def test_apply_eviction_safeguards_min_active_and_last_representation(self):
+        candidates = [
+            {
+                "id": 1,
+                "source": "docs.example.com",
+                "url": "https://docs.example.com/a",
+                "canonical_key": "https://docs.example.com/a",
+                "canonical_guard": True,
+                "value_score": 0.1,
+                "staleness_score": 0.9,
+                "hit_count": 0,
+                "last_seen_at": "2024-01-01T00:00:00+00:00",
+            },
+            {
+                "id": 2,
+                "source": "docs.example.com",
+                "url": "https://docs.example.com/b",
+                "canonical_key": "https://docs.example.com/b",
+                "canonical_guard": True,
+                "value_score": 0.2,
+                "staleness_score": 0.8,
+                "hit_count": 0,
+                "last_seen_at": "2024-01-01T00:00:00+00:00",
+            },
+        ]
+
+        selected = td._apply_eviction_safeguards(
+            candidates=candidates,
+            source_policy_map={"docs.example.com": 1},
+            source_active_counts={"docs.example.com": 2},
+            canonical_active_counts={
+                ("docs.example.com", "https://docs.example.com/a"): 1,
+                ("docs.example.com", "https://docs.example.com/b"): 1,
+            },
+        )
+        # Both candidates are last surviving representations, so neither can be evicted.
+        assert selected == []
+
+    def test_apply_eviction_safeguards_allows_non_last_representation(self):
+        candidates = [
+            {
+                "id": 1,
+                "source": "docs.example.com",
+                "url": "https://docs.example.com/a",
+                "canonical_key": "https://docs.example.com/a",
+                "canonical_guard": True,
+                "value_score": 0.1,
+                "staleness_score": 0.9,
+                "hit_count": 0,
+                "last_seen_at": "2024-01-01T00:00:00+00:00",
+            }
+        ]
+
+        selected = td._apply_eviction_safeguards(
+            candidates=candidates,
+            source_policy_map={"docs.example.com": 0},
+            source_active_counts={"docs.example.com": 4},
+            canonical_active_counts={("docs.example.com", "https://docs.example.com/a"): 2},
+        )
+        assert [c["id"] for c in selected] == [1]
+
+    def test_apply_eviction_safeguards_without_canonical_guard(self):
+        candidates = [{
+            "id": 1,
+            "source": "docs.example.com",
+            "url": "https://docs.example.com/a",
+            "canonical_key": "https://docs.example.com/a",
+            "canonical_guard": False,
+            "value_score": 0.1,
+            "staleness_score": 0.9,
+            "hit_count": 0,
+            "last_seen_at": "2024-01-01T00:00:00+00:00",
+        }]
+        selected = td._apply_eviction_safeguards(
+            candidates=candidates,
+            source_policy_map={"docs.example.com": 0},
+            source_active_counts={"docs.example.com": 1},
+            canonical_active_counts={("docs.example.com", "https://docs.example.com/a"): 1},
+        )
+        assert len(selected) == 1
+
+    def test_apply_min_active_docs_safeguard_returns_candidates_when_allowed(self):
+        candidates = [
+            {
+                "source": "docs.example.com",
+                "value_score": 0.1,
+                "staleness_score": 0.5,
+                "hit_count": 0,
+                "last_seen_at": "2024-01-01T00:00:00+00:00",
+            },
+            {
+                "source": "docs.example.com",
+                "value_score": 0.2,
+                "staleness_score": 0.4,
+                "hit_count": 0,
+                "last_seen_at": "2024-01-01T00:00:00+00:00",
+            },
+        ]
+        out = td._apply_min_active_docs_safeguard(candidates, {"docs.example.com": 1})
+        assert len(out) == 1
+
+    def test_apply_min_active_docs_safeguard_empty_candidates(self):
+        assert td._apply_min_active_docs_safeguard([], {"docs.example.com": 1}) == []
+
+    def test_apply_eviction_safeguards_blocks_on_min_docs(self):
+        candidates = [{
+            "id": 1,
+            "source": "docs.example.com",
+            "url": "https://docs.example.com/a",
+            "canonical_key": "https://docs.example.com/a",
+            "canonical_guard": False,
+            "value_score": 0.1,
+            "staleness_score": 0.9,
+            "hit_count": 0,
+            "last_seen_at": "2024-01-01T00:00:00+00:00",
+        }]
+        out = td._apply_eviction_safeguards(
+            candidates,
+            source_policy_map={"docs.example.com": 1},
+            source_active_counts={"docs.example.com": 1},
+            canonical_active_counts={("docs.example.com", "https://docs.example.com/a"): 1},
+        )
+        assert out == []
+
+    def test_apply_eviction_safeguards_empty_candidates(self):
+        assert td._apply_eviction_safeguards([], {}, {}, {}) == []
+
+    def test_build_active_coverage_maps(self):
+        page = MagicMock()
+        page.url = "https://docs.example.com/a#frag"
+        page.page_metadata = {"source": "docs.example.com", "canonical_url": "https://docs.example.com/a"}
+
+        code = MagicMock()
+        code.url = "https://docs.example.com/b"
+        code.page_metadata = None
+        code.ex_metadata = {"source": "docs.example.com"}
+
+        session = MagicMock()
+        call_n = [0]
+
+        def exec_se(_stmt):
+            call_n[0] += 1
+            m = MagicMock()
+            m.all.return_value = [page] if call_n[0] == 1 else [code]
+            return m
+
+        session.exec.side_effect = exec_se
+        source_counts, canonical_counts = td._build_active_coverage_maps(session)
+        assert source_counts["docs.example.com"] == 2
+        assert canonical_counts[("docs.example.com", "https://docs.example.com/a")] == 1
+        assert canonical_counts[("docs.example.com", "https://docs.example.com/b")] == 1
+
+    def test_dead_page_error_detector(self):
+        assert td._is_dead_page_error("HTTP 404 not found") is True
+        assert td._is_dead_page_error("Resource Gone (410)") is True
+        assert td._is_dead_page_error("timeout") is False
+        assert td._is_dead_page_error(404) is False
+
+    def test_compute_retry_backoff_hours(self):
+        policy = MagicMock()
+        policy.retry_backoff_base_hours = 2
+        policy.max_retry_backoff_hours = 16
+        policy.consecutive_failures = 1
+        assert td._compute_retry_backoff_hours(policy) == 2
+        policy.consecutive_failures = 3
+        assert td._compute_retry_backoff_hours(policy) == 8
+        policy.consecutive_failures = 6
+        assert td._compute_retry_backoff_hours(policy) == 16
+        policy.consecutive_failures = 0
+        assert td._compute_retry_backoff_hours(policy) == 0
+
+    def test_estimate_record_size_bytes_non_string_content(self):
+        record = MagicMock()
+        record.content = 1234
+        record.page_metadata = {"source": "x"}
+        assert td._estimate_record_size_bytes(record) > 0
+
+    @pytest.mark.asyncio
+    async def test_detect_content_drift_triggers_selective_reembed(self):
+        ctx = _make_ctx()
+        r1 = _make_mock_page(uid=1, staleness_score=0.95, hit_count=3)
+        session = MagicMock()
+        session.exec.return_value.all.return_value = [r1]
+
+        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)), \
+             patch("src.crawler.tool_definitions._run_selective_reembed", new_callable=AsyncMock, return_value=1) as mock_reembed:
+            result = await td.detect_content_drift(ctx, trigger_selective_reembed=True)
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["selective_reembed_executed_count"] == 1
+        mock_reembed.assert_awaited_once()
+
+    def test_enforce_source_quotas_tombstones_records(self):
+        policy = MagicMock()
+        policy.max_source_size_mb = 1
+        # Build records exceeding quota with same source metadata
+        page = _make_mock_page(uid=1, source="docs.example.com", value_score=0.1)
+        page.content = "x" * (2 * 1024 * 1024)
+
+        session = MagicMock()
+        call_n = [0]
+
+        def exec_se(_stmt):
+            call_n[0] += 1
+            m = MagicMock()
+            if call_n[0] == 1:
+                m.all.return_value = [page]  # CrawledPage active
+            else:
+                m.all.return_value = []      # CodeExample active
+            return m
+
+        session.exec.side_effect = exec_se
+        with patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts:
+            result = td._enforce_source_quotas(session, {"docs.example.com": policy})
+
+        assert result["quota_evicted"] == 1
+        mock_ts.assert_called_once()
+
+    def test_enforce_source_quotas_no_policies(self):
+        session = MagicMock()
+        result = td._enforce_source_quotas(session, {})
+        assert result == {"quota_evicted": 0, "sources_over_quota": []}
+
+    def test_enforce_source_quotas_skips_invalid_or_under_limit(self):
+        page = _make_mock_page(uid=1, source="docs.example.com", value_score=0.1)
+        page.content = "tiny"
+        session = MagicMock()
+        call_n = [0]
+
+        def exec_se(_stmt):
+            call_n[0] += 1
+            m = MagicMock()
+            m.all.return_value = [page] if call_n[0] == 1 else []
+            return m
+
+        session.exec.side_effect = exec_se
+        invalid_policy = MagicMock()
+        invalid_policy.max_source_size_mb = 0
+        under_policy = MagicMock()
+        under_policy.max_source_size_mb = 100
+
+        result_invalid = td._enforce_source_quotas(session, {"docs.example.com": invalid_policy})
+        assert result_invalid["quota_evicted"] == 0
+
+        # reset side effect for second call
+        call_n[0] = 0
+        result_under = td._enforce_source_quotas(session, {"docs.example.com": under_policy})
+        assert result_under["quota_evicted"] == 0
+
+    def test_enforce_source_quotas_covers_skip_break_and_code_branch(self):
+        other = _make_mock_page(uid=1, source="other.example", value_score=0.1)
+        other.content = "x" * (100 * 1024)
+        page_a = _make_mock_page(uid=2, source="docs.example.com", value_score=0.05)
+        page_a.content = "x" * (100 * 1024)
+        page_b = _make_mock_page(uid=3, source="docs.example.com", value_score=0.06)
+        page_b.content = "x" * (100 * 1024)
+        code = _make_mock_code(uid=4, source="docs.example.com", value_score=0.001)
+        code.content = "y" * (1300 * 1024)
+
+        session = MagicMock()
+        call_n = [0]
+
+        def exec_se(_stmt):
+            call_n[0] += 1
+            m = MagicMock()
+            if call_n[0] == 1:
+                m.all.return_value = [other, page_a, page_b]
+            else:
+                m.all.return_value = [code]
+            return m
+
+        session.exec.side_effect = exec_se
+        policy = MagicMock()
+        policy.max_source_size_mb = 1
+
+        with patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts:
+            result = td._enforce_source_quotas(session, {"docs.example.com": policy})
+
+        assert result["quota_evicted"] >= 1
+        called_tables = [c.args[2] for c in mock_ts.mock_calls]
+        assert "code_examples" in called_tables
+
+    def test_enforce_table_budgets_tombstones_rows(self):
+        page = _make_mock_page(uid=1, source="docs.example.com", value_score=0.1)
+        page.content = "x" * (2 * 1024 * 1024)
+        code = _make_mock_code(uid=2, source="docs.example.com", value_score=0.1)
+        code.content = "y" * (2 * 1024 * 1024)
+
+        session = MagicMock()
+        call_n = [0]
+
+        def exec_se(_stmt):
+            call_n[0] += 1
+            m = MagicMock()
+            if call_n[0] == 1:
+                m.all.return_value = [page]
+            else:
+                m.all.return_value = [code]
+            return m
+
+        session.exec.side_effect = exec_se
+        with patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts:
+            result = td._enforce_table_budgets(
+                session,
+                max_crawled_pages_mb=1,
+                max_code_examples_mb=1,
+            )
+
+        assert result["crawled_pages"] == 1
+        assert result["code_examples"] == 1
+        assert mock_ts.call_count == 2
+
+    def test_enforce_table_budgets_skips_when_under_limit(self):
+        page = _make_mock_page(uid=1, source="docs.example.com", value_score=0.1)
+        page.content = "tiny"
+        session = MagicMock()
+        call_n = [0]
+
+        def exec_se(_stmt):
+            call_n[0] += 1
+            m = MagicMock()
+            m.all.return_value = [page] if call_n[0] == 1 else []
+            return m
+
+        session.exec.side_effect = exec_se
+        with patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts:
+            result = td._enforce_table_budgets(session, max_crawled_pages_mb=100, max_code_examples_mb=100)
+
+        assert result["crawled_pages"] == 0
+        assert result["code_examples"] == 0
+        mock_ts.assert_not_called()
+
+    def test_enforce_table_budgets_hits_break_path(self):
+        page_a = _make_mock_page(uid=11, source="docs.example.com", value_score=0.1)
+        page_a.content = "x" * (700 * 1024)
+        page_b = _make_mock_page(uid=12, source="docs.example.com", value_score=0.2)
+        page_b.content = "x" * (700 * 1024)
+
+        session = MagicMock()
+        call_n = [0]
+
+        def exec_se(_stmt):
+            call_n[0] += 1
+            m = MagicMock()
+            m.all.return_value = [page_a, page_b] if call_n[0] == 1 else []
+            return m
+
+        session.exec.side_effect = exec_se
+        with patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts:
+            result = td._enforce_table_budgets(session, max_crawled_pages_mb=1, max_code_examples_mb=None)
+
+        assert result["crawled_pages"] == 1
+        mock_ts.assert_called_once()
+
+    def test_apply_hard_ttl_delete_deletes_expired_rows(self):
+        old_ts = datetime.now(timezone.utc) - timedelta(days=400)
+        page = _make_mock_page(uid=1, source="docs.example.com")
+        page.last_seen_at = old_ts
+        code = _make_mock_code(uid=2, source="docs.example.com")
+        code.last_seen_at = old_ts
+
+        policy = MagicMock()
+        policy.ttl_days = 90
+
+        session = MagicMock()
+        deleted = []
+        session.delete.side_effect = lambda r: deleted.append(r)
+
+        call_n = [0]
+        def exec_se(_stmt):
+            call_n[0] += 1
+            m = MagicMock()
+            m.all.return_value = [page] if call_n[0] == 1 else [code]
+            return m
+
+        session.exec.side_effect = exec_se
+
+        result = td._apply_hard_ttl_delete(session, {"docs.example.com": policy})
+        assert result["crawled_pages"] == 1
+        assert result["code_examples"] == 1
+        assert len(deleted) == 2
+
+    def test_apply_hard_ttl_delete_skips_non_positive_ttl(self):
+        page = _make_mock_page(uid=1, source="docs.example.com")
+        page.last_seen_at = datetime.now(timezone.utc) - timedelta(days=365)
+        session = MagicMock()
+
+        call_n = [0]
+        def exec_se(_stmt):
+            call_n[0] += 1
+            m = MagicMock()
+            m.all.return_value = [page] if call_n[0] == 1 else []
+            return m
+
+        session.exec.side_effect = exec_se
+        policy = MagicMock()
+        policy.ttl_days = 0
+
+        result = td._apply_hard_ttl_delete(session, {"docs.example.com": policy})
+        assert result["crawled_pages"] == 0
+
+    def test_retire_source_duplicates_and_superseded(self):
+        survivor = _make_mock_page(uid=1, source="docs.example.com", value_score=0.9)
+        survivor.url = "https://docs.example.com/same"
+        survivor.content_hash = "hash-a"
+        survivor.last_crawled_at = datetime.now(timezone.utc)
+        duplicate = _make_mock_page(uid=2, source="docs.example.com", value_score=0.2)
+        duplicate.url = "https://docs.example.com/same"
+        duplicate.content_hash = "hash-a"
+        duplicate.last_crawled_at = datetime.now(timezone.utc) - timedelta(hours=2)
+        superseded = _make_mock_page(uid=3, source="docs.example.com", value_score=0.1)
+        superseded.url = "https://docs.example.com/same"
+        superseded.content_hash = "hash-b"
+        superseded.last_crawled_at = datetime.now(timezone.utc) - timedelta(hours=3)
+
+        session = MagicMock()
+        call_n = [0]
+
+        def exec_se(_stmt):
+            call_n[0] += 1
+            m = MagicMock()
+            if call_n[0] == 1:
+                m.all.return_value = [survivor, duplicate, superseded]
+            else:
+                m.all.return_value = []
+            return m
+
+        session.exec.side_effect = exec_se
+
+        with patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts:
+            result = td._retire_source_duplicates_and_superseded(session, "docs.example.com")
+
+        assert result["duplicate_retired"] == 1
+        assert result["superseded_retired"] == 1
+        assert mock_ts.call_count >= 2
+
+    def test_retire_source_duplicates_and_superseded_code_examples(self):
+        survivor = _make_mock_code(uid=10, source="docs.example.com", value_score=0.9)
+        survivor.url = "https://docs.example.com/same"
+        survivor.content_hash = "hash-a"
+        survivor.last_crawled_at = datetime.now(timezone.utc)
+
+        duplicate = _make_mock_code(uid=11, source="docs.example.com", value_score=0.2)
+        duplicate.url = "https://docs.example.com/same"
+        duplicate.content_hash = "hash-a"
+        duplicate.last_crawled_at = datetime.now(timezone.utc) - timedelta(hours=2)
+
+        superseded = _make_mock_code(uid=12, source="docs.example.com", value_score=0.1)
+        superseded.url = "https://docs.example.com/same"
+        superseded.content_hash = "hash-b"
+        superseded.last_crawled_at = datetime.now(timezone.utc) - timedelta(hours=3)
+
+        session = MagicMock()
+        call_n = [0]
+
+        def exec_se(_stmt):
+            call_n[0] += 1
+            m = MagicMock()
+            if call_n[0] == 1:
+                m.all.return_value = []
+            else:
+                m.all.return_value = [survivor, duplicate, superseded]
+            return m
+
+        session.exec.side_effect = exec_se
+
+        with patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts:
+            result = td._retire_source_duplicates_and_superseded(session, "docs.example.com")
+
+        assert result["duplicate_retired"] == 1
+        assert result["superseded_retired"] == 1
+        called_tables = [c.args[2] for c in mock_ts.mock_calls]
+        assert "code_examples" in called_tables
+
+    @pytest.mark.asyncio
+    async def test_run_selective_reembed_updates_rows(self):
+        row = _make_mock_page(uid=1, source="docs.example.com", hit_count=2)
+        row.content = "reembed me"
+        session = MagicMock()
+        session.exec.return_value.all.return_value = [row]
+
+        with patch("src.crawler.tool_definitions.create_embedding", new_callable=AsyncMock, return_value=[0.1, 0.2]):
+            updated = await td._run_selective_reembed(session, [1])
+
+        assert updated == 1
+        assert row.staleness_score == 0.0
+        session.commit.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_run_selective_reembed_handles_empty_ids_and_non_text(self):
+        session = MagicMock()
+        assert await td._run_selective_reembed(session, []) == 0
+
+        row = _make_mock_page(uid=1)
+        row.content = "   "
+        session.exec.return_value.all.return_value = [row]
+        updated = await td._run_selective_reembed(session, [1])
+        assert updated == 0
+
+
+class TestNewBudgetActionReporting:
+    @pytest.mark.asyncio
+    async def test_enforce_budget_reports_new_action_lines(self):
+        ctx = _make_ctx()
+        session = MagicMock()
+        session.exec.return_value.all.return_value = []
+        session.exec.return_value.first.return_value = None
+
+        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)), \
+             patch("src.crawler.tool_definitions._get_db_size_bytes", return_value=int(0.95 * 10.0 * 1024 ** 3)), \
+             patch("src.crawler.tool_definitions._apply_hard_ttl_delete", return_value={"crawled_pages": 1, "code_examples": 0}), \
+             patch("src.crawler.tool_definitions._enforce_source_quotas", return_value={"quota_evicted": 2, "sources_over_quota": ["example.com"]}), \
+             patch("src.crawler.tool_definitions._enforce_table_budgets", return_value={"crawled_pages": 1, "code_examples": 1}), \
+             patch("src.crawler.tool_definitions.tombstone_records", return_value=0):
+            result = await td.enforce_storage_budget(ctx, force=True)
+
+        data = json.loads(result)
+        assert data["success"] is True
+        joined = " ".join(data["actions_taken"])
+        assert "hard-ttl deleted" in joined
+        assert "source-quota tombstoned" in joined
+        assert "table-budget tombstoned" in joined
+
+
+class TestRunIdHelpers:
+    def test_normalize_run_id(self):
+        assert td._normalize_run_id(None) is None
+        assert td._normalize_run_id(123) is None
+        assert td._normalize_run_id("   ") is None
+        assert td._normalize_run_id(" run-123 ") == "run-123"
+
+    def test_generate_run_id_prefix(self):
+        run_id = td._generate_run_id("test")
+        assert run_id.startswith("test-")
+        assert len(run_id) > len("test-")
+
+
+class TestRetrievalScopeWrappers:
+    @pytest.mark.asyncio
+    async def test_search_raw_markdown_forwards_variant(self):
+        ctx = _make_ctx()
+        with patch("src.crawler.tool_definitions.search_documents_v2", new_callable=AsyncMock, return_value='{"success": true}') as mock_search:
+            result = await td.search_raw_markdown(ctx, query="q", source="docs.example.com")
+        data = json.loads(result)
+        assert data["success"] is True
+        assert mock_search.await_args.kwargs["markdown_variant"] == "raw_markdown"
+
+    @pytest.mark.asyncio
+    async def test_search_fit_markdown_forwards_variant(self):
+        ctx = _make_ctx()
+        with patch("src.crawler.tool_definitions.search_documents_v2", new_callable=AsyncMock, return_value='{"success": true}') as mock_search:
+            result = await td.search_fit_markdown(ctx, query="q", source="docs.example.com")
+        data = json.loads(result)
+        assert data["success"] is True
+        assert mock_search.await_args.kwargs["markdown_variant"] == "fit_markdown"
+
+
+class TestDetectContentDrift:
+    @pytest.mark.asyncio
+    async def test_detect_content_drift_classifies_rows(self):
+        ctx = _make_ctx()
+
+        r1 = _make_mock_page(uid=1, staleness_score=0.2, hit_count=0)
+        r2 = _make_mock_page(uid=2, staleness_score=0.7, hit_count=0)
+        r3 = _make_mock_page(uid=3, staleness_score=0.9, hit_count=5)
+
+        session = MagicMock()
+        session.exec.return_value.all.return_value = [r1, r2, r3]
+
+        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+            result = await td.detect_content_drift(ctx)
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["counts"]["total"] == 3
+        assert data["counts"]["unchanged"] == 1
+        assert data["counts"]["minor_update"] == 1
+        assert data["counts"]["major_rewrite"] == 1
+        assert data["selective_reembed_candidate_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_detect_content_drift_source_filter(self):
+        ctx = _make_ctx()
+        include = _make_mock_page(uid=1, staleness_score=0.3, source="a.com")
+        exclude = _make_mock_page(uid=2, staleness_score=0.9, source="b.com")
+
+        session = MagicMock()
+        session.exec.return_value.all.return_value = [include, exclude]
+
+        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+            result = await td.detect_content_drift(ctx, source="a.com")
+
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["counts"]["total"] == 1
+
+    @pytest.mark.asyncio
+    async def test_detect_content_drift_exception(self):
+        ctx = _make_ctx()
+        session = MagicMock()
+        session.exec.side_effect = RuntimeError("drift fail")
+
+        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+            result = await td.detect_content_drift(ctx)
+
+        data = json.loads(result)
+        assert data["success"] is False
+        assert "drift fail" in data["error"]

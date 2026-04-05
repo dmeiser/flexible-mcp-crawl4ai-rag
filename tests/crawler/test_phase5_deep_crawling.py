@@ -4,6 +4,7 @@ import json
 import os
 import pytest
 from contextlib import contextmanager
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 os.environ.setdefault("POSTGRES_URL", "postgresql://u:p@localhost:5432/testdb")
@@ -139,6 +140,7 @@ class TestCrawlToMarkdownWithDeepCrawling:
         assert data["success"] is True
         assert data["follow_links_enabled"] is True
         assert data["deep_crawl_mode"] == "compatibility_recursive"
+        assert data["compatibility_helper_used"] is True
         # Should call recursive crawl function
         mock_recursive.assert_called_once()
         call_kwargs = mock_recursive.call_args[1]
@@ -244,6 +246,7 @@ class TestCrawlManyUrlsWithDeepCrawling:
         assert data["success"] is True
         assert data["pages_crawled"] == 1
         assert data["follow_links_enabled"] is False
+        assert data["compatibility_helper_used"] is False
         # Should use batch arun_many
         mock_crawler.arun_many.assert_called_once()
     
@@ -272,6 +275,7 @@ class TestCrawlManyUrlsWithDeepCrawling:
         
         data = json.loads(result)
         assert data["success"] is True
+        assert data["compatibility_helper_used"] is True
         # One call per starting URL
         assert mock_recursive.call_count == 2
     
@@ -445,6 +449,100 @@ class TestWaveAndPhase4HelperCoverage:
         assert td._json_safe_artifact([1, 2]) == [1, 2]
         assert td._json_safe_artifact(MagicMock()) is None
 
+    def test_reference_metadata_helpers(self):
+        reference_meta = td._build_reference_metadata({
+            "markdown_with_citations": "Body [1]",
+            "references_markdown": "[1]: https://example.com/ref Example reference",
+        })
+        assert reference_meta["has_citations"] is True
+        assert reference_meta["link_references"][0]["url"] == "https://example.com/ref"
+
+        provenance = td._build_requested_provenance({
+            "source": "example.com",
+            "url": "https://example.com",
+            "source_type": "remote_url",
+            "references_markdown": "[1]: https://example.com/ref Example reference",
+            "link_references": [{"label": "1", "url": "https://example.com/ref", "text": "Example reference"}],
+            "has_citations": True,
+        })
+        assert provenance["has_link_references"] is True
+        assert provenance["link_references"][0]["text"] == "Example reference"
+
+    def test_select_rows_for_variant_prefers_requested_variant(self):
+        raw_row = MagicMock(page_metadata={"markdown_variant": "raw_markdown"})
+        fit_row = MagicMock(page_metadata={"markdown_variant": "fit_markdown"})
+        selected = td._select_rows_for_variant([fit_row, raw_row], "raw_markdown")
+        assert selected == [raw_row]
+
+        fallback = td._select_rows_for_variant([fit_row], "raw_markdown")
+        assert fallback == [fit_row]
+
+    def test_markdown_index_policy_helpers(self):
+        assert td._normalize_markdown_index_policy("raw-only") == "raw-only"
+        assert td._normalize_markdown_index_policy("fit-only") == "fit-only"
+        assert td._normalize_markdown_index_policy("both-by-default") == "both-by-default"
+        assert td._normalize_markdown_index_policy("weird") == "both-by-default"
+        assert td._normalize_index_variants_override("raw") == "raw"
+        assert td._normalize_index_variants_override(" fit ") == "fit"
+        assert td._normalize_index_variants_override("both") == "both"
+        assert td._normalize_index_variants_override("invalid") is None
+
+    def test_resolve_variants_to_index_modes_and_fallbacks(self):
+        variants = {
+            "raw_markdown": "raw",
+            "fit_markdown": "fit",
+            "markdown_with_citations": "cited",
+            "references_markdown": "refs",
+            "fit_html": "<p>fit</p>",
+        }
+        with patch("src.crawler.tool_definitions.settings", MagicMock(MARKDOWN_INDEX_POLICY="both-by-default")):
+            keys, policy, override, notes = td._resolve_variants_to_index(variants, index_variants=None)
+            assert keys == ["raw_markdown", "fit_markdown"]
+            assert policy == "both-by-default"
+            assert override is None
+            assert notes == []
+
+        with patch("src.crawler.tool_definitions.settings", MagicMock(MARKDOWN_INDEX_POLICY="fit-only")):
+            keys, policy, override, notes = td._resolve_variants_to_index(
+                {**variants, "fit_markdown": ""},
+                index_variants=None,
+                fallback_enabled=True,
+            )
+            assert keys == ["raw_markdown"]
+            assert policy == "fit-only"
+            assert "fit_markdown unavailable" in notes[0]
+
+        with patch("src.crawler.tool_definitions.settings", MagicMock(MARKDOWN_INDEX_POLICY="fit-only")):
+            keys, _, _, notes = td._resolve_variants_to_index(
+                {**variants, "fit_markdown": ""},
+                index_variants=None,
+                fallback_enabled=False,
+            )
+            assert keys == []
+            assert "fallback disabled" in notes[0]
+
+        with patch("src.crawler.tool_definitions.settings", MagicMock(MARKDOWN_INDEX_POLICY="raw-only")):
+            keys, _, override, _ = td._resolve_variants_to_index(variants, index_variants="both")
+            assert keys == ["raw_markdown", "fit_markdown"]
+            assert override == "both"
+
+        with patch("src.crawler.tool_definitions.settings", MagicMock(MARKDOWN_INDEX_POLICY="both-by-default")):
+            keys_raw, _, override_raw, _ = td._resolve_variants_to_index(variants, index_variants="raw")
+            keys_fit, _, override_fit, _ = td._resolve_variants_to_index(variants, index_variants="fit")
+            assert keys_raw == ["raw_markdown"]
+            assert keys_fit == ["fit_markdown"]
+            assert override_raw == "raw"
+            assert override_fit == "fit"
+
+        with patch("src.crawler.tool_definitions.settings", MagicMock(MARKDOWN_INDEX_POLICY="raw-only")):
+            keys, _, _, notes = td._resolve_variants_to_index(
+                {**variants, "raw_markdown": ""},
+                index_variants=None,
+                fallback_enabled=True,
+            )
+            assert keys == ["fit_markdown"]
+            assert "raw_markdown unavailable" in notes[0]
+
 
 class TestAdditionalToolPathCoverage:
     @pytest.mark.asyncio
@@ -505,6 +603,114 @@ class TestAdditionalToolPathCoverage:
         assert data["content_filter_applied"] == "pruning"
         config = mock_crawler.arun.call_args.kwargs["config"]
         assert getattr(config, "markdown_generator", None) is not None
+
+    @pytest.mark.asyncio
+    async def test_crawl_to_markdown_indexes_both_variants_with_override(self):
+        mock_crawler = AsyncMock()
+        md_obj = MagicMock(
+            raw_markdown="# raw",
+            fit_markdown="# fit",
+            markdown_with_citations="# cited",
+            references_markdown="refs",
+            fit_html="<p>fit</p>",
+        )
+        mock_result = MagicMock(success=True, markdown=md_obj, url="https://x.com")
+        mock_crawler.arun.return_value = mock_result
+        ctx = _make_ctx(crawler=mock_crawler)
+
+        captured_metas = []
+
+        async def _capture_add(session, urls, contents, metas, chunks, fulldocs):
+            captured_metas.extend(metas)
+            return len(urls)
+
+        with patch("src.crawler.tool_definitions.settings", MagicMock(MARKDOWN_INDEX_POLICY="raw-only", MARKDOWN_FALLBACK_ENABLED=True)), \
+             patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()), \
+             patch("src.crawler.tool_definitions.chunk_text_according_to_settings", new_callable=AsyncMock, return_value=["chunk"]), \
+             patch("src.crawler.tool_definitions.add_documents_to_db", new_callable=AsyncMock, side_effect=_capture_add):
+            out = await td.crawl_to_markdown(
+                ctx,
+                "https://x.com",
+                index_result=True,
+                index_variants="both",
+            )
+
+        data = json.loads(out)
+        assert data["success"] is True
+        assert sorted(data["indexed_variants"]) == ["fit_markdown", "raw_markdown"]
+        assert data["index_variants_override"] == "both"
+        assert set(m["markdown_variant"] for m in captured_metas) == {"raw_markdown", "fit_markdown"}
+
+    @pytest.mark.asyncio
+    async def test_crawl_to_markdown_persists_reference_metadata(self):
+        mock_crawler = AsyncMock()
+        md_obj = MagicMock(
+            raw_markdown="# raw",
+            fit_markdown="# fit",
+            markdown_with_citations="# cited [1]",
+            references_markdown="[1]: https://example.com/ref Example reference",
+            fit_html="<p>fit</p>",
+        )
+        mock_crawler.arun.return_value = MagicMock(success=True, markdown=md_obj, url="https://x.com")
+        ctx = _make_ctx(crawler=mock_crawler)
+
+        captured_metas = []
+
+        async def _capture_add(session, urls, contents, metas, chunks, fulldocs):
+            captured_metas.extend(metas)
+            return len(urls)
+
+        with patch("src.crawler.tool_definitions.settings", MagicMock(MARKDOWN_INDEX_POLICY="raw-only", MARKDOWN_FALLBACK_ENABLED=True)), \
+             patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()), \
+             patch("src.crawler.tool_definitions.chunk_text_according_to_settings", new_callable=AsyncMock, return_value=["chunk"]), \
+             patch("src.crawler.tool_definitions.add_documents_to_db", new_callable=AsyncMock, side_effect=_capture_add):
+            out = await td.crawl_to_markdown(ctx, "https://x.com", index_result=True)
+
+        data = json.loads(out)
+        assert data["success"] is True
+        assert captured_metas[0]["references_markdown"].startswith("[1]: https://example.com/ref")
+        assert captured_metas[0]["link_references"][0]["url"] == "https://example.com/ref"
+        assert captured_metas[0]["has_citations"] is True
+
+    @pytest.mark.asyncio
+    async def test_crawl_to_markdown_invalid_override_note(self):
+        mock_crawler = AsyncMock()
+        mock_crawler.arun.return_value = MagicMock(success=True, markdown="# raw", url="https://x.com")
+        ctx = _make_ctx(crawler=mock_crawler)
+
+        with patch("src.crawler.tool_definitions.settings", MagicMock(MARKDOWN_INDEX_POLICY="raw-only", MARKDOWN_FALLBACK_ENABLED=True)), \
+             patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()), \
+             patch("src.crawler.tool_definitions.chunk_text_according_to_settings", new_callable=AsyncMock, return_value=["chunk"]), \
+             patch("src.crawler.tool_definitions.add_documents_to_db", new_callable=AsyncMock, return_value=1):
+            out = await td.crawl_to_markdown(
+                ctx,
+                "https://x.com",
+                index_result=True,
+                index_variants="nope",
+            )
+
+        data = json.loads(out)
+        assert data["success"] is True
+        assert data["index_variants_override"] is None
+        assert any("invalid index_variants override" in note for note in data["index_fallback_notes"])
+
+    @pytest.mark.asyncio
+    async def test_crawl_to_markdown_skip_empty_index_variant_content(self):
+        mock_crawler = AsyncMock()
+        mock_crawler.arun.return_value = MagicMock(success=True, markdown="# raw", url="https://x.com")
+        ctx = _make_ctx(crawler=mock_crawler)
+
+        with patch("src.crawler.tool_definitions.settings", MagicMock(MARKDOWN_INDEX_POLICY="both-by-default", MARKDOWN_FALLBACK_ENABLED=True)), \
+             patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()), \
+             patch("src.crawler.tool_definitions._resolve_variants_to_index", return_value=( ["fit_markdown"], "both-by-default", None, [] )), \
+             patch("src.crawler.tool_definitions.chunk_text_according_to_settings", new_callable=AsyncMock, return_value=["chunk"]) as chunker, \
+             patch("src.crawler.tool_definitions.add_documents_to_db", new_callable=AsyncMock, return_value=0):
+            out = await td.crawl_to_markdown(ctx, "https://x.com", index_result=True)
+
+        data = json.loads(out)
+        assert data["success"] is True
+        assert data["chunks_stored"] == 0
+        chunker.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_crawl_many_urls_markdown_controls_applied(self):
@@ -694,8 +900,9 @@ class TestAdditionalToolPathCoverage:
     async def test_search_documents_alias_and_document_fetch_tools(self):
         ctx = _make_ctx()
 
-        with patch("src.crawler.tool_definitions.perform_rag_query", new_callable=AsyncMock, return_value=json.dumps({"success": True, "results": []})):
-            alias_out = await td.search_documents_tool(ctx, "q")
+        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()), \
+             patch("src.crawler.tool_definitions.search_documents", new_callable=AsyncMock, return_value=[]):
+            alias_out = await td.search_documents_v2(ctx, "q")
             assert json.loads(alias_out)["success"] is True
 
         row = MagicMock(id=7, url="https://x.com", chunk_number=0, content="abc", page_metadata={"a": 1})
@@ -705,6 +912,27 @@ class TestAdditionalToolPathCoverage:
             got = json.loads(await td.get_document_by_id(ctx, 7))
             assert got["success"] is True
             assert got["document"]["id"] == 7
+
+        row_with_refs = MagicMock(
+            id=8,
+            url="https://x.com",
+            chunk_number=1,
+            content="abc",
+            page_metadata={
+                "source": "x.com",
+                "url": "https://x.com",
+                "source_type": "remote_url",
+                "references_markdown": "[1]: https://example.com/ref Example reference",
+                "link_references": [{"label": "1", "url": "https://example.com/ref", "text": "Example reference"}],
+                "has_citations": True,
+            },
+        )
+        session_refs = MagicMock()
+        session_refs.exec.return_value.first.return_value = row_with_refs
+        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session_refs)):
+            got_refs = json.loads(await td.get_document_by_id(ctx, 8, include_provenance=True))
+            assert got_refs["document"]["provenance"]["has_citations"] is True
+            assert got_refs["document"]["provenance"]["link_references"][0]["url"] == "https://example.com/ref"
 
         session2 = MagicMock()
         session2.exec.return_value.first.return_value = None
@@ -719,14 +947,22 @@ class TestAdditionalToolPathCoverage:
     @pytest.mark.asyncio
     async def test_get_markdown_by_url_success_and_empty(self):
         ctx = _make_ctx()
-        row1 = MagicMock(content="a")
-        row2 = MagicMock(content="b")
+        row1 = MagicMock(content="a", page_metadata={"markdown_variant": "raw_markdown", "references_markdown": "[1]: https://example.com/ref Example reference", "link_references": [{"label": "1", "url": "https://example.com/ref", "text": "Example reference"}], "has_citations": True})
+        row2 = MagicMock(content="b", page_metadata={"markdown_variant": "fit_markdown"})
         session = MagicMock()
         session.exec.return_value.all.return_value = [row1, row2]
         with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
             out = json.loads(await td.get_markdown_by_url(ctx, "https://x.com"))
             assert out["success"] is True
-            assert out["chunk_count"] == 2
+            assert out["chunk_count"] == 1
+            assert out["selected_variant"] == "raw_markdown"
+
+        session_prov = MagicMock()
+        session_prov.exec.return_value.all.return_value = [row1, row2]
+        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session_prov)):
+            out_prov = json.loads(await td.get_markdown_by_url(ctx, "https://x.com", include_provenance=True))
+            assert out_prov["provenance"]["has_citations"] is True
+            assert out_prov["provenance"]["link_references"][0]["url"] == "https://example.com/ref"
 
         session2 = MagicMock()
         session2.exec.return_value.all.return_value = []
@@ -742,28 +978,25 @@ class TestAdditionalToolPathCoverage:
     async def test_crawl_url_dispatch_markdown(self):
         ctx = _make_ctx()
         with patch("src.crawler.tool_definitions.crawl_to_markdown", new_callable=AsyncMock, return_value=json.dumps({"success": True, "type": "markdown"})) as md:
-            out = json.loads(await td.crawl_url(ctx, "https://x.com", mode="markdown", session_id="s1"))
+            out = json.loads(await td.crawl_url(ctx, "https://x.com", mode="markdown", session_id="s1", index_variants="both"))
             assert out["success"] is True
             assert out["type"] == "markdown"
             md.assert_awaited_once()
+            assert md.call_args.kwargs["index_variants"] == "both"
 
     @pytest.mark.asyncio
     async def test_crawl_url_dispatch_smart(self):
         ctx = _make_ctx()
-        with patch("src.crawler.tool_definitions.smart_crawl_url", new_callable=AsyncMock, return_value=json.dumps({"success": True, "type": "smart"})) as sm:
-            out = json.loads(await td.crawl_url(ctx, "https://x.com", mode="smart", link_filter=r"/docs/.*"))
-            assert out["success"] is True
-            assert out["type"] == "smart"
-            sm.assert_awaited_once()
+        out = json.loads(await td.crawl_url(ctx, "https://x.com", mode="smart", link_filter=r"/docs/.*"))
+        assert out["success"] is False
+        assert "removed" in out["error"]
 
     @pytest.mark.asyncio
     async def test_crawl_url_dispatch_legacy(self):
         ctx = _make_ctx()
-        with patch("src.crawler.tool_definitions.crawl_single_page", new_callable=AsyncMock, return_value=json.dumps({"success": True, "type": "legacy"})) as lg:
-            out = json.loads(await td.crawl_url(ctx, "https://x.com", mode="legacy"))
-            assert out["success"] is True
-            assert out["type"] == "legacy"
-            lg.assert_awaited_once()
+        out = json.loads(await td.crawl_url(ctx, "https://x.com", mode="legacy"))
+        assert out["success"] is False
+        assert "removed" in out["error"]
 
     @pytest.mark.asyncio
     async def test_crawl_url_dispatch_deep(self):
@@ -879,6 +1112,14 @@ class TestBuildDeepCrawlStrategy:
             scorer_type="weird",
         )
         assert s.url_scorer is not None
+
+    def test_custom_registered_scorer_type_supported(self):
+        with patch("src.crawler.tool_definitions.get_supported_scorer_types", return_value=["keyword", "custom"]) as _:
+            # Directly verify builder uses registered scorer abstraction via patched build
+            with patch("src.crawler.tool_definitions.build_url_scorer", return_value={"scorer": "custom"}) as build:
+                s = td._build_deep_crawl_strategy(strategy="best_first", scorer_type="custom", keywords=["python"])
+                assert s.url_scorer == {"scorer": "custom"}
+                build.assert_called_once()
 
 
 class TestCrawlDeep:
@@ -1361,6 +1602,142 @@ class TestCrawlAdaptive:
         assert out["success"] is False
         assert any("Empty markdown variant" in e["error"] for e in out["errors"])
 
+    @pytest.mark.asyncio
+    async def test_exportable_knowledge_base_jsonl_and_markdown(self):
+        ctx = _make_ctx(crawler=AsyncMock())
+        r1 = self._make_result("https://example.com", markdown="# A")
+        state = MagicMock(knowledge_base=[r1])
+
+        adaptive_inst = MagicMock()
+        adaptive_inst.digest = AsyncMock(return_value=state)
+        adaptive_inst.get_relevant_content.return_value = [{"url": "https://example.com", "score": 0.9}]
+        adaptive_inst.confidence = 0.88
+        adaptive_inst.coverage_stats = {"pages": 1}
+
+        with patch("src.crawler.tool_definitions.AdaptiveCrawler", return_value=adaptive_inst):
+            out_jsonl = json.loads(await td.crawl_adaptive(
+                ctx,
+                "https://example.com",
+                query="what is this",
+                index_result=False,
+                export_knowledge_base=True,
+                knowledge_base_format="jsonl",
+            ))
+
+            out_md = json.loads(await td.crawl_adaptive(
+                ctx,
+                "https://example.com",
+                query="what is this",
+                index_result=False,
+                export_knowledge_base=True,
+                knowledge_base_format="markdown",
+            ))
+
+        assert out_jsonl["success"] is True
+        assert out_jsonl["knowledge_base_export"]["format"] == "jsonl"
+        assert "https://example.com" in out_jsonl["knowledge_base_export"]["data"]
+
+        assert out_md["success"] is True
+        assert out_md["knowledge_base_export"]["format"] == "markdown"
+        assert "## 1. https://example.com" in out_md["knowledge_base_export"]["data"]
+
+    @pytest.mark.asyncio
+    async def test_exportable_knowledge_base_invalid_format_defaults_json(self):
+        ctx = _make_ctx(crawler=AsyncMock())
+        r1 = self._make_result("https://example.com", markdown="# A")
+        state = MagicMock(knowledge_base=[r1])
+
+        adaptive_inst = MagicMock()
+        adaptive_inst.digest = AsyncMock(return_value=state)
+        adaptive_inst.get_relevant_content.return_value = []
+        adaptive_inst.confidence = 0.2
+        adaptive_inst.coverage_stats = {}
+
+        with patch("src.crawler.tool_definitions.AdaptiveCrawler", return_value=adaptive_inst):
+            out = json.loads(await td.crawl_adaptive(
+                ctx,
+                "https://example.com",
+                query="q",
+                index_result=False,
+                export_knowledge_base=True,
+                knowledge_base_format="tarball",
+            ))
+
+        assert out["success"] is True
+        assert out["knowledge_base_export"]["format"] == "json"
+        assert isinstance(out["knowledge_base_export"]["data"], list)
+
+    @pytest.mark.asyncio
+    async def test_adaptive_answer_from_indexed_results(self):
+        ctx = _make_ctx(crawler=AsyncMock())
+        r1 = self._make_result("https://example.com", markdown="# A")
+        state = MagicMock(knowledge_base=[r1])
+
+        adaptive_inst = MagicMock()
+        adaptive_inst.digest = AsyncMock(return_value=state)
+        adaptive_inst.get_relevant_content.return_value = []
+        adaptive_inst.confidence = 0.91
+        adaptive_inst.coverage_stats = {"pages": 1}
+
+        search_rows = [
+            {
+                "url": "https://example.com",
+                "content": "Adaptive answer content for query.",
+                "page_metadata": {"crawl_type": "adaptive_statistical_raw_markdown"},
+                "similarity_score": 0.98,
+            }
+        ]
+
+        with patch("src.crawler.tool_definitions.AdaptiveCrawler", return_value=adaptive_inst), \
+             patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()), \
+             patch("src.crawler.tool_definitions.store_crawled_documents", new_callable=AsyncMock, return_value=(1, 1)), \
+             patch("src.crawler.tool_definitions.search_documents", new_callable=AsyncMock, return_value=search_rows):
+            out = json.loads(await td.crawl_adaptive(
+                ctx,
+                "https://example.com",
+                query="crawl query",
+                index_result=True,
+                answer_query="final question",
+                answer_match_count=2,
+            ))
+
+        assert out["success"] is True
+        assert out["stopped_when_confident"] is True
+        assert out["adaptive_answer"]["query"] == "final question"
+        assert "Adaptive answer content" in out["adaptive_answer"]["answer"]
+        assert out["adaptive_answer"]["supporting_results"][0]["url"] == "https://example.com"
+
+    @pytest.mark.asyncio
+    async def test_adaptive_answer_without_index_uses_pseudo_rows(self):
+        ctx = _make_ctx(crawler=AsyncMock())
+        r1 = self._make_result("https://example.com", markdown="# A from pseudo rows")
+        state = MagicMock(knowledge_base=[r1])
+
+        adaptive_inst = MagicMock()
+        adaptive_inst.digest = AsyncMock(return_value=state)
+        adaptive_inst.get_relevant_content.return_value = []
+        adaptive_inst.confidence = 0.2
+        adaptive_inst.coverage_stats = {}
+
+        with patch("src.crawler.tool_definitions.AdaptiveCrawler", return_value=adaptive_inst):
+            out = json.loads(await td.crawl_adaptive(
+                ctx,
+                "https://example.com",
+                query="crawl query",
+                index_result=False,
+                answer_query="final question",
+            ))
+
+        assert out["success"] is True
+        assert out["stopped_when_confident"] is False
+        assert out["adaptive_answer"]["query"] == "final question"
+        assert "# A from pseudo rows" in out["adaptive_answer"]["answer"]
+
+    def test_build_adaptive_answer_empty_rows(self):
+        answer = td._build_adaptive_answer("q", [])
+        assert answer["query"] == "q"
+        assert answer["supporting_results"] == []
+
 
 class TestPhase1TaxonomyWrappers:
     @pytest.mark.asyncio
@@ -1501,10 +1878,46 @@ class TestPhase1TaxonomyWrappers:
         assert out["fit_markdown"] == "# fit"
         assert out["chunks_stored"] == 0
 
-        with patch("src.crawler.tool_definitions.index_markdown", new_callable=AsyncMock, return_value=json.dumps({"success": True, "chunks_stored": 3})):
-            out2 = json.loads(await td.extract_markdown_variants(ctx, "https://x.com", index_result=True))
+        captured_metas = []
+        async def _capture_add(session, urls, contents, metas, chunks, fulldocs):
+            captured_metas.extend(metas)
+            return len(urls)
+
+        with patch("src.crawler.tool_definitions.settings", MagicMock(MARKDOWN_INDEX_POLICY="both-by-default", MARKDOWN_FALLBACK_ENABLED=True)), \
+             patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()), \
+             patch("src.crawler.tool_definitions.chunk_text_according_to_settings", new_callable=AsyncMock, return_value=["c"]), \
+             patch("src.crawler.tool_definitions.add_documents_to_db", new_callable=AsyncMock, side_effect=_capture_add):
+            out2 = json.loads(await td.extract_markdown_variants(ctx, "https://x.com", index_result=True, index_variants="both"))
             assert out2["success"] is True
-            assert out2["chunks_stored"] == 3
+            assert out2["chunks_stored"] >= 2
+            assert sorted(out2["indexed_variants"]) == ["fit_markdown", "raw_markdown"]
+            assert set(m["markdown_variant"] for m in captured_metas) == {"raw_markdown", "fit_markdown"}
+
+        with patch("src.crawler.tool_definitions.settings", MagicMock(MARKDOWN_INDEX_POLICY="raw-only", MARKDOWN_FALLBACK_ENABLED=True)), \
+             patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()), \
+             patch("src.crawler.tool_definitions.chunk_text_according_to_settings", new_callable=AsyncMock, return_value=["c"]), \
+             patch("src.crawler.tool_definitions.add_documents_to_db", new_callable=AsyncMock, return_value=1):
+            out2b = json.loads(await td.extract_markdown_variants(ctx, "https://x.com", index_result=True, index_variants="bad-mode"))
+            assert out2b["success"] is True
+            assert out2b["index_variants_override"] is None
+            assert any("invalid index_variants override" in note for note in out2b["index_fallback_notes"])
+
+        with patch("src.crawler.tool_definitions.settings", MagicMock(MARKDOWN_INDEX_POLICY="both-by-default", MARKDOWN_FALLBACK_ENABLED=True)), \
+             patch("src.crawler.tool_definitions._extract_markdown_variants", return_value={
+                 "raw_markdown": "",
+                 "fit_markdown": "# fit",
+                 "markdown_with_citations": "# fit",
+                 "references_markdown": "",
+                 "fit_html": "<p>fit</p>",
+             }), \
+             patch("src.crawler.tool_definitions._resolve_variants_to_index", return_value=( ["raw_markdown"], "both-by-default", None, [] )), \
+             patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()), \
+             patch("src.crawler.tool_definitions.chunk_text_according_to_settings", new_callable=AsyncMock, return_value=["c"]) as chunker, \
+             patch("src.crawler.tool_definitions.add_documents_to_db", new_callable=AsyncMock, return_value=0):
+            out2c = json.loads(await td.extract_markdown_variants(ctx, "https://x.com", index_result=True))
+            assert out2c["success"] is True
+            assert out2c["chunks_stored"] == 0
+            chunker.assert_not_awaited()
 
         crawler2 = AsyncMock()
         crawler2.arun.return_value = MagicMock(success=False, markdown=None, error_message="fail")
@@ -1593,7 +2006,8 @@ class TestPhase1TaxonomyWrappers:
     @pytest.mark.asyncio
     async def test_search_and_get_fit_tools(self):
         ctx = _make_ctx()
-        with patch("src.crawler.tool_definitions.perform_rag_query", new_callable=AsyncMock, return_value=json.dumps({"success": True, "results": []})):
+        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()), \
+             patch("src.crawler.tool_definitions.search_documents", new_callable=AsyncMock, return_value=[]):
             out = json.loads(await td.search_documents_v2(ctx, "q"))
             assert out["success"] is True
 
@@ -1629,13 +2043,21 @@ class TestPhase1TaxonomyWrappers:
             assert out3["success"] is False
 
         fit_row = MagicMock(content="fit one", page_metadata={"markdown_variant": "fit_markdown"})
-        other_row = MagicMock(content="raw one", page_metadata={"markdown_variant": "raw_markdown"})
+        other_row = MagicMock(content="raw one", page_metadata={"markdown_variant": "raw_markdown", "references_markdown": "[1]: https://example.com/ref Example reference", "link_references": [{"label": "1", "url": "https://example.com/ref", "text": "Example reference"}], "has_citations": True})
         session = MagicMock()
         session.exec.return_value.all.return_value = [fit_row, other_row]
         with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
             out4 = json.loads(await td.get_fit_markdown_by_url(ctx, "https://x.com"))
             assert out4["success"] is True
             assert out4["chunk_count"] == 1
+
+        fit_row_with_prov = MagicMock(content="fit one", page_metadata={"markdown_variant": "fit_markdown", "references_markdown": "[1]: https://example.com/ref Example reference", "link_references": [{"label": "1", "url": "https://example.com/ref", "text": "Example reference"}], "has_citations": True})
+        session_prov = MagicMock()
+        session_prov.exec.return_value.all.return_value = [fit_row_with_prov, other_row]
+        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session_prov)):
+            out4b = json.loads(await td.get_fit_markdown_by_url(ctx, "https://x.com", include_provenance=True))
+            assert out4b["provenance"]["has_citations"] is True
+            assert out4b["provenance"]["link_references"][0]["url"] == "https://example.com/ref"
 
         session2 = MagicMock()
         session2.exec.return_value.all.return_value = [other_row]
@@ -1646,4 +2068,168 @@ class TestPhase1TaxonomyWrappers:
         with patch("src.crawler.tool_definitions.get_session", side_effect=RuntimeError("fit-boom")):
             out6 = json.loads(await td.get_fit_markdown_by_url(ctx, "https://x.com"))
             assert out6["success"] is False
+
+
+class TestPhase789NewTools:
+    @pytest.mark.asyncio
+    async def test_crawl_with_auth_hooks_success(self):
+        ctx = _make_ctx()
+        with patch(
+            "src.crawler.tool_definitions.crawl_with_browser_config",
+            new_callable=AsyncMock,
+            return_value=json.dumps({"success": True, "selected_variant": "raw_markdown"}),
+        ) as mock_browser:
+            out = json.loads(await td.crawl_with_auth_hooks(
+                ctx,
+                url="https://example.com/private",
+                session_id="sess-1",
+                custom_headers={"Authorization": "Bearer token"},
+                cookies=[{"name": "sid", "value": "abc"}],
+                local_storage={"auth": "ok"},
+                route_block_patterns=["*.png"],
+                final_scroll=True,
+            ))
+
+        assert out["success"] is True
+        assert out["workflow_mode"] == "direct_auth_hooks"
+        assert out["auth_hooks_applied"]["custom_headers"] is True
+        assert out["auth_hooks_applied"]["route_block_patterns"] is True
+        mock_browser.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_crawl_with_auth_hooks_pre_post_scripts(self):
+        ctx = _make_ctx()
+        with patch(
+            "src.crawler.tool_definitions.crawl_with_browser_config",
+            new_callable=AsyncMock,
+            return_value=json.dumps({"success": True}),
+        ):
+            out = json.loads(await td.crawl_with_auth_hooks(
+                ctx,
+                url="https://example.com/private",
+                session_id="sess-2",
+                pre_navigation_js="console.log('pre')",
+                post_navigation_js="console.log('post')",
+            ))
+        assert out["success"] is True
+        assert out["auth_hooks_applied"]["pre_navigation_js"] is True
+        assert out["auth_hooks_applied"]["post_navigation_js"] is True
+
+    @pytest.mark.asyncio
+    async def test_crawl_login_required_and_paginated_wrappers(self):
+        ctx = _make_ctx()
+        with patch(
+            "src.crawler.tool_definitions.crawl_with_auth_hooks",
+            new_callable=AsyncMock,
+            return_value=json.dumps({"success": True}),
+        ):
+            login = json.loads(await td.crawl_login_required(
+                ctx,
+                url="https://example.com/login",
+                session_id="s-login",
+                login_script="console.log('login')",
+            ))
+        assert login["success"] is True
+        assert login["workflow_mode"] == "login_required_preset"
+
+        with patch(
+            "src.crawler.tool_definitions.crawl_many_urls",
+            new_callable=AsyncMock,
+            return_value=json.dumps({"success": True, "pages_crawled": 2}),
+        ):
+            paginated = json.loads(await td.crawl_paginated(
+                ctx,
+                start_url="https://example.com/page/1",
+                session_id="s-page",
+                additional_urls=["https://example.com/page/2"],
+            ))
+        assert paginated["success"] is True
+        assert paginated["workflow_mode"] == "paginated_preset"
+
+    @pytest.mark.asyncio
+    async def test_ingest_content_directory_paths(self, tmp_path):
+        ctx = _make_ctx()
+        d = tmp_path / "docs"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "a.md").write_text("# A\n\ncontent", encoding="utf-8")
+        (d / "b.html").write_text("<html><body><h1>B</h1></body></html>", encoding="utf-8")
+
+        with patch("src.crawler.tool_definitions.index_markdown", new_callable=AsyncMock, return_value=json.dumps({"success": True})), \
+             patch("src.crawler.tool_definitions.crawl_raw_html", new_callable=AsyncMock, return_value=json.dumps({"success": True, "pages_indexed": 1})):
+            out = json.loads(await td.ingest_content_directory(ctx, str(d), index_result=True))
+
+        assert out["success"] is True
+        assert out["files_discovered"] == 2
+        assert out["files_processed"] == 2
+
+        bad = json.loads(await td.ingest_content_directory(ctx, str(d / "missing"), index_result=True))
+        assert bad["success"] is False
+
+    @pytest.mark.asyncio
+    async def test_ingest_content_directory_empty_and_error_branches(self, tmp_path):
+        ctx = _make_ctx()
+        d = tmp_path / "empty"
+        d.mkdir(parents=True, exist_ok=True)
+
+        empty = json.loads(await td.ingest_content_directory(ctx, str(d), include_patterns=["**/*.xyz"], index_result=False))
+        assert empty["success"] is True
+        assert empty["files_discovered"] == 0
+
+        # invalid pattern entry exercises pattern-continue branch
+        empty_invalid_pattern = json.loads(await td.ingest_content_directory(ctx, str(d), include_patterns=[None, "   "], index_result=False))
+        assert empty_invalid_pattern["success"] is True
+        assert empty_invalid_pattern["files_discovered"] == 0
+
+        md_file = d / "bad.md"
+        md_file.write_text("# x", encoding="utf-8")
+        with patch("src.crawler.tool_definitions.index_markdown", new_callable=AsyncMock, return_value=json.dumps({"success": False, "error": "idx fail"})):
+            failed_index = json.loads(await td.ingest_content_directory(ctx, str(d), include_patterns=["**/*.md"], index_result=True))
+        assert failed_index["success"] is True
+        assert failed_index["errors"]
+
+        html_file = d / "bad.html"
+        html_file.write_text("<html><body>x</body></html>", encoding="utf-8")
+        with patch("src.crawler.tool_definitions.crawl_raw_html", new_callable=AsyncMock, return_value=json.dumps({"success": False, "error": "crawl fail"})):
+            failed_html = json.loads(await td.ingest_content_directory(ctx, str(d), include_patterns=["**/*.html"], index_result=True))
+        assert failed_html["success"] is True
+        assert failed_html["errors"]
+
+        no_index = json.loads(await td.ingest_content_directory(ctx, str(d), include_patterns=["**/*.md"], index_result=False))
+        assert no_index["success"] is True
+        assert no_index["files_processed"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_ingest_content_directory_outer_exception_path(self):
+        ctx = _make_ctx()
+        with patch("src.crawler.tool_definitions.Path.expanduser", side_effect=RuntimeError("path boom")):
+            out = json.loads(await td.ingest_content_directory(ctx, "/tmp/anything"))
+        assert out["success"] is False
+        assert "path boom" in out["error"]
+
+    def test_freshness_and_eviction_helper_branches(self):
+        assert td._parse_datetime_utc("not-a-date") is None
+        assert td._parse_datetime_utc(datetime.now()) is not None
+
+        assert td._is_result_fresh({"staleness_score": 0.9}, 0.5, None) is False
+        assert td._is_result_fresh({"expires_at": "2000-01-01T00:00:00+00:00"}, 0.5, None) is False
+        assert td._is_result_fresh({"crawl_timestamp": "2030-01-01T00:00:00+00:00"}, 0.5, datetime.fromisoformat("2029-01-01T00:00:00+00:00")) is False
+
+        assert td._compute_freshness_from_metadata({}) == 0.5
+        assert 0.0 <= td._compute_freshness_from_metadata({"crawl_time": "2025-01-01T00:00:00+00:00"}) <= 1.0
+
+        candidates = [
+            {"source": "a", "value_score": 0.1, "staleness_score": 0.1, "hit_count": 1, "last_seen_at": "2025-01-01T00:00:00+00:00"},
+            {"source": "a", "value_score": 0.2, "staleness_score": 0.1, "hit_count": 1, "last_seen_at": "2025-01-01T00:00:00+00:00"},
+        ]
+        safeguarded = td._apply_min_active_docs_safeguard(candidates, {"a": 2})
+        assert safeguarded == []
+
+    @pytest.mark.asyncio
+    async def test_phase7_wrapper_invalid_session_paths(self):
+        ctx = _make_ctx()
+        bad_auth = json.loads(await td.crawl_with_auth_hooks(ctx, "https://x.com", session_id="   "))
+        assert bad_auth["success"] is False
+
+        bad_paginated = json.loads(await td.crawl_paginated(ctx, "https://x.com", session_id="  "))
+        assert bad_paginated["success"] is False
 

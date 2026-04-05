@@ -1,337 +1,143 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-# flexible crawl4ai RAG MCP server
+# flexible-mcp-crawl4ai-rag
+
+A **Crawl4AI-backed RAG wrapper** exposed via MCP.
+
+This project is not just a crawler. It is a composable platform for:
+- acquisition (crawl/deep/adaptive/session/local/raw)
+- transformation (raw/fit/cited markdown + structured extraction)
+- indexing (pgvector + metadata-rich variants)
+- retrieval (representation-aware search + freshness controls)
+
+## What this project is (and is not)
+
+- ✅ It is a production-minded MCP layer around Crawl4AI primitives with RAG indexing/retrieval.
+- ✅ It is scheduler-driven for freshness/eviction maintenance.
+- ❌ It does **not** expose MCP admin/ops endpoints for storage maintenance.
+
+Freshness and storage lifecycle operations run in background scheduler jobs only.
+
+## Quick start
+
+### Docker compose (recommended)
+
+1. Copy env template and edit values:
+   - `cp .env.example .env`
+2. Start stack:
+   - `docker compose up -d`
+3. MCP SSE endpoint:
+   - `http://localhost:8051/sse`
+
+### Local run (uv)
+
+1. Create venv and install:
+   - `uv venv`
+   - `source .venv/bin/activate`
+   - `uv pip install -e .`
+2. Run server:
+   - `uv run src/crawl4ai_mcp.py`
+
+## Tool categories
+
+### Acquisition
+- `crawl_url`
+- `crawl_to_markdown`
+- `crawl_many_urls`
+- `crawl_deep`
+- `crawl_adaptive`
+- `crawl_with_session`, `create_session`, `inspect_session`, `kill_session`
+- `crawl_with_auth_hooks`, `crawl_login_required`, `crawl_paginated`
+- `crawl_local_file`, `crawl_raw_html`, `ingest_content_directory`
+
+### Transformation / extraction
+- `extract_markdown_variants`
+- `extract_fit_markdown`
+- `extract_structured_json`
+- `extract_regex_entities`
+- `extract_knowledge_graph`
+- `extract_code_examples`
+- `generate_extraction_schema`, `validate_extraction_schema`
+
+### Indexing
+- `index_markdown`
+- `index_fit_markdown`
+- `index_structured_content`
+- `index_code_examples`
+
+### Retrieval
+- `search_documents`
+- `search_raw_markdown`
+- `search_fit_markdown`
+- `search_structured_content`
+- `search_code_examples` (feature-flagged)
+- `get_document_by_id`
+- `get_markdown_by_url`
+- `get_fit_markdown_by_url`
+
+## Safe defaults vs advanced options
+
+### Safe defaults
+- headless crawling
+- no admin/ops lifecycle endpoints
+- scheduler-driven freshness/eviction
+- deterministic extraction schema validation
+- offline deterministic unit test suite by default
+
+### Advanced options
+- crawl run config allowlist (`cache_mode`, JS hooks, screenshot/pdf/mhtml, etc.)
+- browser config allowlist (`headers`, `cookies`, stealth, viewport, etc.)
+- deep crawl strategy and filter chains
+- adaptive crawl strategy selection and export modes
+- representation filters at retrieval time
+
+## Markdown vs fit markdown vs structured extraction
+
+- **raw markdown**: best for completeness and archival provenance.
+- **fit markdown**: best for tighter RAG context density.
+- **structured extraction**: best for schema-driven data access and hybrid JSON+vector use cases.
+
+Recommended approach:
+- index both raw + fit when feasible
+- use structured extraction when queries depend on stable fields/records
+
+## Storage model and retrieval modes
 
-this is a fork of the original [Crawl4AI RAG MCP Server](https://github.com/coleam00/mcp-crawl4ai-rag) with significant improvements for performance, local deployment, and independence from external API services.
+Primary persisted entities:
+- `crawled_pages`
+- `code_examples`
+- `source_policies`
+- `storage_policies`
+- `eviction_audit_log`
 
-## improvements
+Freshness metadata includes:
+- `first_seen_at`, `last_seen_at`, `last_crawled_at`
+- `expires_at`, `staleness_score`
+- `content_hash`, `source_change_id`
+- `is_active`, `tombstoned_at`
 
-- **postgresql with pgvector**: replaced Supabase with direct PostgreSQL + pgvector integration for complete control over vector storage
-- **local embeddings with ollama**: switched from OpenAI API to local Ollama for generating embeddings, eliminating API costs and latency
-- **contextual embeddings**: improved implementation of contextual embeddings that allows for more customization through configurable LLM providers (including OpenRouter) and models
-- **docker compose setup**: added comprehensive docker-compose.yml with separate services for the app and PostgreSQL database
-- **optimized dockerfile**: multi-stage build process reduces image size and build time by 70%+
-- **fully containerized**: all dependencies pre-installed in the Docker image, eliminating download time at container start
-- **improved configuration**: enhanced environment variable handling with Pydantic Settings
-- **better error handling**: added robust error handling for database and embedding operations
-- **code refactoring**: split monolithic file into organized modules for better maintainability
+Retrieval supports:
+- vector search with optional hybrid behavior
+- freshness-aware filters/reranking
+- representation-specific search wrappers
 
-## updated configuration
+## Testing
 
-create a `.env` file in the project root with variables matching this structure:
+### Unit tests
+- `make test`
+- targeted: `pytest -q tests/crawler/test_tool_definitions.py`
 
-```
-# MCP server transport configuration
-TRANSPORT=sse
-HOST=0.0.0.0
-PORT=8051
+### Integration / e2e smoke
+- `MCP_URL=http://localhost:8051/sse uv run python tests/integration_smoke.py`
+- strict rollout: `EXPECT_NEW_TOOLS=true MCP_URL=http://localhost:8051/sse uv run python tests/integration_smoke.py`
 
-# database configuration
-POSTGRES_USER=youruser
-POSTGRES_PASSWORD=yourpassword
-POSTGRES_DB=crawlrag
-POSTGRES_URL=postgresql://youruser:yourpassword@rag-db:5432/crawlrag
+## Migration and cookbook
 
-# ollama configuration
-OLLAMA_API_URL=http://host.docker.internal:11434/api/embeddings
-OLLAMA_EMBED_MODEL=bge-m3-FP16
-OLLAMA_EMBEDDING_DIM=1024
-```
+- Migration guidance: `docs/MIGRATION.md`
+- Cookbook workflows: `docs/COOKBOOK.md`
 
-## quick start with docker compose
+## Project identity summary
 
-the simplest way to run this fork is with docker compose:
+When using this repo, think:
 
-```bash
-# clone the repository
-git clone https://github.com/cairodavila/mcp-crawl4ai-rag.git
-cd mcp-crawl4ai-rag
-
-# create .env file with your configuration
-cp .env.example .env
-# edit .env with your settings
-
-# start the services
-docker compose up -d
-```
-
----
-
-<h1 align="center">Crawl4AI RAG MCP Server</h1>
-
-<p align="center">
-  <em>Web Crawling and RAG Capabilities for AI Agents and AI Coding Assistants</em>
-</p>
-
-A powerful implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io) integrated with [Crawl4AI](https://crawl4ai.com) and [Supabase](https://supabase.com/) for providing AI agents and AI coding assistants with advanced web crawling and RAG capabilities.
-
-With this MCP server, you can <b>scrape anything</b> and then <b>use that knowledge anywhere</b> for RAG.
-
-The primary goal is to bring this MCP server into [Archon](https://github.com/coleam00/Archon) as I evolve it to be more of a knowledge engine for AI coding assistants to build AI agents. This first version of the Crawl4AI/RAG MCP server will be improved upon greatly soon, especially making it more configurable so you can use different embedding models and run everything locally with Ollama.
-
-## Overview
-
-This MCP server provides tools that enable AI agents to crawl websites, store content in a vector database (Supabase), and perform RAG over the crawled content. It follows the best practices for building MCP servers based on the [Mem0 MCP server template](https://github.com/coleam00/mcp-mem0/) I provided on my channel previously.
-
-## Vision
-
-The Crawl4AI RAG MCP server is just the beginning. Here's where we're headed:
-
-1. **Integration with Archon**: Building this system directly into [Archon](https://github.com/coleam00/Archon) to create a comprehensive knowledge engine for AI coding assistants to build better AI agents.
-
-2. **Multiple Embedding Models**: Expanding beyond OpenAI to support a variety of embedding models, including the ability to run everything locally with Ollama for complete control and privacy.
-
-3. **Advanced RAG Strategies**: Implementing sophisticated retrieval techniques like contextual retrieval, late chunking, and others to move beyond basic "naive lookups" and significantly enhance the power and precision of the RAG system, especially as it integrates with Archon.
-
-4. **Enhanced Chunking Strategy**: Implementing a Context 7-inspired chunking approach that focuses on examples and creates distinct, semantically meaningful sections for each chunk, improving retrieval precision.
-
-5. **Performance Optimization**: Increasing crawling and indexing speed to make it more realistic to "quickly" index new documentation to then leverage it within the same prompt in an AI coding assistant.
-
-## Features
-
-- **Smart URL Detection**: Automatically detects and handles different URL types (regular webpages, sitemaps, text files)
-- **Recursive Crawling**: Follows internal links to discover content
-- **Parallel Processing**: Efficiently crawls multiple pages simultaneously
-- **Content Chunking**: Intelligently splits content by headers and size for better processing
-- **Vector Search**: Performs RAG over crawled content, optionally filtering by data source for precision
-- **Source Retrieval**: Retrieve sources available for filtering to guide the RAG process
-
-## Tools
-
-The server exposes a modern MCP toolset for crawling, retrieval, and RAG workflows.
-
-### Recommended crawl entrypoint
-
-1. **`crawl_url`**: Unified crawl API (recommended). Supports:
-  - `mode="markdown"` for markdown-focused crawling
-  - `mode="smart"` for adaptive crawl strategy selection
-  - `mode="legacy"` for backward-compatible single-page behavior
-
-### Crawl and indexing tools
-
-2. **`crawl_to_markdown`**: Crawl one URL with markdown variants, extraction options, deep-crawl controls, and optional indexing
-3. **`crawl_many_urls`**: Crawl many URLs with extraction and optional deep-crawl behavior
-4. **`crawl_local_file`**: Crawl local file content through Crawl4AI pipeline
-5. **`crawl_raw_html`**: Crawl raw HTML content directly
-6. **`crawl_single_page`**: Legacy single-page crawl tool (kept for compatibility)
-7. **`smart_crawl_url`**: Adaptive crawl router for sitemap/txt/recursive/single strategies
-
-### Retrieval tools
-
-8. **`get_available_sources`**: List indexed sources (domains)
-9. **`perform_rag_query`**: Semantic retrieval query with optional source filtering
-10. **`search_documents_tool`**: Alias for semantic retrieval in newer taxonomy
-11. **`get_document_by_id`**: Retrieve one stored chunk by ID
-12. **`get_markdown_by_url`**: Reconstruct markdown from stored chunks for a URL
-
-### Legacy-to-modern tool mapping
-
-| Legacy tool | Status | Prefer this tool |
-|---|---|---|
-| `crawl_single_page` | Deprecated compatibility | `crawl_url` (`mode="legacy"` or `mode="markdown"`) |
-| `smart_crawl_url` | Deprecated compatibility | `crawl_url` (`mode="smart"`) |
-| `perform_rag_query` | Deprecated compatibility | `search_documents` |
-| `search_documents_tool` | Compatibility alias | `search_documents` |
-
-Modern taxonomy additions now available:
-- `crawl_with_session`
-- `extract_fit_markdown`, `extract_structured_json`, `extract_regex_entities`, `extract_knowledge_graph`, `extract_code_examples`
-- `index_markdown`, `index_fit_markdown`, `index_structured_content`, `index_code_examples`
-- `search_structured_content`, `get_fit_markdown_by_url`
-
-## Prerequisites
-
-- [Docker/Docker Desktop](https://www.docker.com/products/docker-desktop/) if running the MCP server as a container (recommended)
-- [Python 3.12+](https://www.python.org/downloads/) if running the MCP server directly through uv
-- PostgreSQL with pgvector (or the included docker-compose setup)
-- Ollama or compatible embedding provider configured via environment variables
-
-## Installation
-
-### Using Docker (Recommended)
-
-1. Clone this repository:
-   ```bash
-   git clone https://github.com/coleam00/mcp-crawl4ai-rag.git
-   cd mcp-crawl4ai-rag
-   ```
-
-2. Build the Docker image:
-   ```bash
-   docker build -t mcp/crawl4ai-rag --build-arg PORT=8051 .
-   ```
-
-3. Create a `.env` file based on the configuration section below
-
-### Using uv directly (no Docker)
-
-1. Clone this repository:
-   ```bash
-   git clone https://github.com/coleam00/mcp-crawl4ai-rag.git
-   cd mcp-crawl4ai-rag
-   ```
-
-2. Install uv if you don't have it:
-   ```bash
-   pip install uv
-   ```
-
-3. Create and activate a virtual environment:
-   ```bash
-   uv venv
-   .venv\Scripts\activate
-   # on Mac/Linux: source .venv/bin/activate
-   ```
-
-4. Install dependencies:
-   ```bash
-   uv pip install -e .
-   crawl4ai-setup
-   ```
-
-5. Create a `.env` file based on the configuration section below
-
-## Database Setup
-
-Before running the server, you need to set up the database with the pgvector extension:
-
-1. Go to the SQL Editor in your Supabase dashboard (create a new project first if necessary)
-
-2. Create a new query and paste the contents of `crawled_pages.sql`
-
-3. Run the query to create the necessary tables and functions
-
-## Configuration
-
-Create a `.env` file in the project root with the following variables:
-
-```
-# MCP Server Configuration
-HOST=0.0.0.0
-PORT=8051
-TRANSPORT=sse
-
-# OpenAI API Configuration
-OPENAI_API_KEY=your_openai_api_key
-
-# Supabase Configuration
-SUPABASE_URL=your_supabase_project_url
-SUPABASE_SERVICE_KEY=your_supabase_service_key
-```
-
-## Running the Server
-
-### Using Docker
-
-```bash
-docker run --env-file .env -p 8051:8051 mcp/crawl4ai-rag
-```
-
-### Using Python
-
-```bash
-uv run src/crawl4ai_mcp.py
-```
-
-The server will start and listen on the configured host and port.
-
-## Integration with MCP Clients
-
-## Verification and smoke testing
-
-Use the integration smoke test against a running SSE server:
-
-```bash
-MCP_URL=http://localhost:8051/sse uv run python tests/integration_smoke.py
-```
-
-During rollout validation (after rebuilding to the latest image), enforce that newly introduced tools are present:
-
-```bash
-EXPECT_NEW_TOOLS=true MCP_URL=http://localhost:8051/sse uv run python tests/integration_smoke.py
-```
-
-When `EXPECT_NEW_TOOLS=true`, smoke will fail if `crawl_url` or `crawl_deep` are missing.
-
-### SSE Configuration
-
-Once you have the server running with SSE transport, you can connect to it using this configuration:
-
-```json
-{
-  "mcpServers": {
-    "crawl4ai-rag": {
-      "transport": "sse",
-      "url": "http://localhost:8051/sse"
-    }
-  }
-}
-```
-
-> **Note for Windsurf users**: Use `serverUrl` instead of `url` in your configuration:
-> ```json
-> {
->   "mcpServers": {
->     "crawl4ai-rag": {
->       "transport": "sse",
->       "serverUrl": "http://localhost:8051/sse"
->     }
->   }
-> }
-> ```
->
-> **Note for Docker users**: Use `host.docker.internal` instead of `localhost` if your client is running in a different container. This will apply if you are using this MCP server within n8n!
-
-### Stdio Configuration
-
-Add this server to your MCP configuration for Claude Desktop, Windsurf, or any other MCP client:
-
-```json
-{
-  "mcpServers": {
-    "crawl4ai-rag": {
-      "command": "python",
-      "args": ["path/to/crawl4ai-mcp/src/crawl4ai_mcp.py"],
-      "env": {
-        "TRANSPORT": "stdio",
-        "OPENAI_API_KEY": "your_openai_api_key",
-        "SUPABASE_URL": "your_supabase_url",
-        "SUPABASE_SERVICE_KEY": "your_supabase_service_key"
-      }
-    }
-  }
-}
-```
-
-### Docker with Stdio Configuration
-
-```json
-{
-  "mcpServers": {
-    "crawl4ai-rag": {
-      "command": "docker",
-      "args": ["run", "--rm", "-i", 
-               "-e", "TRANSPORT", 
-               "-e", "OPENAI_API_KEY", 
-               "-e", "SUPABASE_URL", 
-               "-e", "SUPABASE_SERVICE_KEY", 
-               "mcp/crawl4ai"],
-      "env": {
-        "TRANSPORT": "stdio",
-        "OPENAI_API_KEY": "your_openai_api_key",
-        "SUPABASE_URL": "your_supabase_url",
-        "SUPABASE_SERVICE_KEY": "your_supabase_service_key"
-      }
-    }
-  }
-}
-```
-
-## Building Your Own Server
-
-This implementation provides a foundation for building more complex MCP servers with web crawling capabilities. To build your own:
-
-1. Add your own tools by creating methods with the `@mcp.tool()` decorator
-2. Create your own lifespan function to add your own dependencies
-3. Modify the `utils.py` file for any helper functions you need
-4. Extend the crawling capabilities by adding more specialized crawlers
+> “Crawl4AI acquisition + transformation primitives wrapped by MCP, with pgvector-backed variant-aware RAG retrieval and scheduler-driven freshness lifecycle.”

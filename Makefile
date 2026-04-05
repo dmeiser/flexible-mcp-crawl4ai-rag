@@ -9,7 +9,7 @@
 #   make test-integration — run smoke tests against the live Docker stack
 #   make clean           — stop stack and remove volumes
 
-.PHONY: test test-fast lint build up down logs test-integration verify-e2e clean help
+.PHONY: test test-fast lint build up down logs test-integration verify-e2e clean help _refresh-app _wait-mcp
 
 IMAGE_NAME   ?= crawl4ai-mcp
 COMPOSE_FILE ?= docker-compose.yml
@@ -63,11 +63,20 @@ clean:
 	docker compose -f $(COMPOSE_FILE) down -v --remove-orphans
 
 # -------------------------------------------------------------------------
-# Integration / smoke tests against live Docker stack
-# Requires: stack to be running (`make up`)
+# Integration / smoke tests against live Docker stack.
+# Rebuild/recreate app service first so tests always target current source.
 # -------------------------------------------------------------------------
-test-integration: _check-stack-up
+test-integration: _refresh-app _wait-mcp
 	MCP_URL=http://localhost:$(PORT)/sse uv run python tests/integration_smoke.py
+
+_refresh-app:
+	docker compose -f $(COMPOSE_FILE) up -d --build --force-recreate $(APP_SERVICE)
+	@echo "Waiting for $(APP_SERVICE) container to be running…"
+	@timeout 180 sh -c 'until docker compose -f $(COMPOSE_FILE) ps --status=running | grep -q "$(APP_SERVICE)"; do sleep 2; done'
+
+_wait-mcp:
+	@echo "Waiting for $(APP_SERVICE) health status = healthy ..."
+	@timeout 180 sh -c 'until [ "$$(docker inspect -f "{{.State.Health.Status}}" $(APP_SERVICE) 2>/dev/null)" = "healthy" ]; do sleep 2; done'
 
 # Full local verification flow requested for this project:
 # 1) unit tests with 100% coverage gate

@@ -8,6 +8,7 @@ import os
 import json
 import hashlib
 import math
+import re
 from enum import Enum
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Generator, Tuple
@@ -61,6 +62,12 @@ class ContentClass(str, Enum):
     MARKDOWN_FIT = "markdown_fit"
 
 
+class MarkdownIndexPolicy(str, Enum):
+    RAW_ONLY = "raw-only"
+    FIT_ONLY = "fit-only"
+    BOTH_BY_DEFAULT = "both-by-default"
+
+
 # ---------------------------------------------------------------------------
 # Application settings
 # ---------------------------------------------------------------------------
@@ -93,6 +100,10 @@ class Settings(BaseSettings):
     USE_HYBRID_SEARCH: bool = False
     USE_AGENTIC_RAG: bool = False
     USE_RERANKING: bool = False
+
+    # Markdown indexing policy
+    MARKDOWN_INDEX_POLICY: MarkdownIndexPolicy = MarkdownIndexPolicy.BOTH_BY_DEFAULT
+    MARKDOWN_FALLBACK_ENABLED: bool = True
 
     # LLM for contextual embeddings
     LLM_ENABLED: bool = False
@@ -139,7 +150,8 @@ class CrawledPage(SQLModel, table=True):
     content_class: str = Field(default=ContentClass.TEXT.value, index=True)
     is_active: bool = Field(default=True, index=True)
     crawl_timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
-    content_hash: Optional[str] = Field(default=None, index=True)
+    content_hash: str = Field(index=True)
+    source_change_id: Optional[str] = Field(default=None, index=True)
     # Phase 9.5 - freshness lifecycle
     first_seen_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_seen_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -169,7 +181,8 @@ class CodeExample(SQLModel, table=True):
     content_class: str = Field(default=ContentClass.CODE.value, index=True)
     is_active: bool = Field(default=True, index=True)
     crawl_timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
-    content_hash: Optional[str] = Field(default=None, index=True)
+    content_hash: str = Field(index=True)
+    source_change_id: Optional[str] = Field(default=None, index=True)
     # Phase 9.5 - freshness lifecycle
     first_seen_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_seen_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -195,6 +208,11 @@ class SourcePolicy(SQLModel, table=True):
     priority_weight: float = Field(default=1.0)
     min_active_docs: int = Field(default=20)
     max_source_size_mb: Optional[int] = Field(default=None)
+    retry_backoff_base_hours: int = Field(default=2)
+    max_retry_backoff_hours: int = Field(default=168)
+    consecutive_failures: int = Field(default=0)
+    next_retry_at: Optional[datetime] = Field(default=None)
+    dead_page_failures_threshold: int = Field(default=3)
 
 
 class StoragePolicy(SQLModel, table=True):
@@ -208,6 +226,8 @@ class StoragePolicy(SQLModel, table=True):
     hard_threshold: float = Field(default=1.00)
     target_post_evict_ratio: float = Field(default=0.75)
     tombstone_grace_hours: int = Field(default=24)
+    max_crawled_pages_mb: Optional[int] = Field(default=None)
+    max_code_examples_mb: Optional[int] = Field(default=None)
 
 
 class EvictionAuditLog(SQLModel, table=True):
@@ -575,14 +595,32 @@ async def add_documents_to_db(
             content_hash = meta_with_size.get("content_hash")
             if not isinstance(content_hash, str) or not content_hash:
                 content_hash = hashlib.sha256(b_texts[i].encode("utf-8")).hexdigest()
+            source_change_id = meta_with_size.get("source_change_id")
+            if not isinstance(source_change_id, str) or not source_change_id.strip():
+                source_change_id = None
+            references_markdown = meta_with_size.get("references_markdown")
+            if not isinstance(references_markdown, str):
+                references_markdown = ""
+            link_references = meta_with_size.get("link_references")
+            if not isinstance(link_references, list):
+                link_references = extract_link_references(references_markdown)
+            meta_with_size["references_markdown"] = references_markdown
+            meta_with_size["link_references"] = link_references
+            meta_with_size["has_citations"] = bool(meta_with_size.get("has_citations", False))
             retrieval_metadata = {
                 "source": meta_with_size.get("source"),
                 "url": meta_with_size.get("url"),
                 "crawl_type": meta_with_size.get("crawl_type"),
+                "run_id": meta_with_size.get("run_id"),
                 "markdown_variant": meta_with_size.get("markdown_variant"),
                 "extraction_strategy": meta_with_size.get("extraction_strategy"),
                 "session_id": meta_with_size.get("session_id"),
                 "source_type": meta_with_size.get("source_type"),
+                "crawl_timestamp": meta_with_size.get("crawl_timestamp") or meta_with_size.get("crawl_time"),
+                "references_markdown": references_markdown,
+                "link_references": link_references,
+                "has_link_references": bool(references_markdown or link_references),
+                "has_citations": meta_with_size["has_citations"],
             }
             rows.append(
                 CrawledPage(
@@ -594,6 +632,7 @@ async def add_documents_to_db(
                     is_active=is_active,
                     crawl_timestamp=crawl_timestamp,
                     content_hash=content_hash,
+                    source_change_id=source_change_id,
                     page_metadata=meta_with_size,
                     retrieval_metadata=retrieval_metadata,
                     embedding=emb,
@@ -657,6 +696,9 @@ async def add_code_examples_to_db(
         content_hash = meta.get("content_hash")
         if not isinstance(content_hash, str) or not content_hash:
             content_hash = hashlib.sha256(contents[i].encode("utf-8")).hexdigest()
+        source_change_id = meta.get("source_change_id")
+        if not isinstance(source_change_id, str) or not source_change_id.strip():
+            source_change_id = None
         crawl_ts = _parse_iso_datetime(meta.get("crawl_timestamp") or meta.get("crawl_time"))
         rows.append(
             CodeExample(
@@ -670,6 +712,7 @@ async def add_code_examples_to_db(
                 is_active=bool(meta.get("is_active", True)),
                 crawl_timestamp=crawl_ts,
                 content_hash=content_hash,
+                source_change_id=source_change_id,
                 ex_metadata=meta,
                 embedding=emb,
                 first_seen_at=first_seen_code_map.get((urls[i], chunk_numbers[i]), _now_code),
@@ -929,3 +972,50 @@ def extract_code_blocks(markdown: str) -> List[Dict[str, str]]:
         if code:
             blocks.append({"language": lang, "content": code})
     return blocks
+
+
+def extract_link_references(references_markdown: str) -> List[Dict[str, str]]:
+    """Extract structured link references from references markdown text."""
+    if not references_markdown or not references_markdown.strip():
+        return []
+
+    extracted: List[Dict[str, str]] = []
+    for line in references_markdown.splitlines():
+        candidate = line.strip()
+        if not candidate:
+            continue
+
+        markdown_ref = re.match(r"^\[(?P<label>[^\]]+)\]\s*:\s*(?P<url>https?://\S+)(?:\s+(?P<text>.*))?$", candidate)
+        if markdown_ref:
+            extracted.append(
+                {
+                    "label": markdown_ref.group("label"),
+                    "url": markdown_ref.group("url"),
+                    "text": (markdown_ref.group("text") or "").strip(),
+                }
+            )
+            continue
+
+        markdown_link = re.search(r"\[(?P<text>[^\]]+)\]\((?P<url>https?://[^)]+)\)", candidate)
+        if markdown_link:
+            extracted.append(
+                {
+                    "label": str(len(extracted) + 1),
+                    "url": markdown_link.group("url"),
+                    "text": markdown_link.group("text").strip(),
+                }
+            )
+            continue
+
+        plain_url = re.search(r"(?P<url>https?://\S+)", candidate)
+        if plain_url:
+            label_match = re.match(r"^(?P<label>\d+)[\.:\)]", candidate)
+            extracted.append(
+                {
+                    "label": label_match.group("label") if label_match else str(len(extracted) + 1),
+                    "url": plain_url.group("url"),
+                    "text": candidate,
+                }
+            )
+
+    return extracted
