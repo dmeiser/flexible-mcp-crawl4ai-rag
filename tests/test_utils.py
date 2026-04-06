@@ -1,13 +1,11 @@
 """Unit tests for src/utils.py — 100% coverage, all offline."""
-import asyncio
-import json
-import math
+
 import builtins
-import pytest
-import numpy as np
+import math
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import os
+import pytest
 
 os.environ.setdefault("POSTGRES_URL", "postgresql://u:p@localhost:5432/testdb")
 os.environ.setdefault("EMBEDDING_PROVIDER", "ollama")
@@ -24,39 +22,40 @@ os.environ.setdefault("USE_AGENTIC_RAG", "false")
 os.environ.setdefault("USE_RERANKING", "false")
 
 from src.utils import (
-    Settings,
-    get_session,
-    EmbeddingProvider,
-    EmbeddingError,
-    OllamaError,
     ChunkStrategy,
-    _normalize,
-    create_embedding,
+    EmbeddingError,
+    EmbeddingProvider,
+    OllamaError,
+    Settings,
+    _code_example_row_to_result,
     _create_ollama_embedding,
     _create_openai_embedding,
-    create_embeddings_batch,
-    generate_contextual_text,
-    upsert_source,
-    add_documents_to_db,
-    add_code_examples_to_db,
-    search_documents,
-    _python_side_vector_search,
-    search_code_examples,
-    rerank_results,
-    extract_code_blocks,
-    settings,
+    _extract_record_source,
+    _get_db_size_bytes,
+    _merge_vector_and_fts_rows,
+    _normalize,
+    _normalize_source_change_id,
     _parse_iso_datetime,
-    CrawledPage,
-    CodeExample,
-    Source,
-    SourcePolicy,
-    StoragePolicy,
-    EvictionAuditLog,
+    _python_side_vector_search,
+    _query_code_example_rows,
+    _request_contextual_summary,
+    _resolve_content_hash,
+    _resolve_link_references,
+    add_code_examples_to_db,
+    add_documents_to_db,
     compute_staleness_score,
     compute_value_score,
-    tombstone_records,
-    _get_db_size_bytes,
+    create_embedding,
+    create_embeddings_batch,
+    extract_code_blocks,
     extract_link_references,
+    generate_contextual_text,
+    get_session,
+    rerank_results,
+    search_code_examples,
+    search_documents,
+    tombstone_records,
+    upsert_source,
 )
 
 DIM = 4
@@ -107,6 +106,7 @@ def _fake_settings(**kw):
 # Tests: EmbeddingError / OllamaError alias
 # ---------------------------------------------------------------------------
 
+
 def test_ollama_error_is_embedding_error():
     assert OllamaError is EmbeddingError
 
@@ -119,6 +119,7 @@ def test_embedding_error_raise():
 # ---------------------------------------------------------------------------
 # Tests: ChunkStrategy / EmbeddingProvider enums
 # ---------------------------------------------------------------------------
+
 
 def test_chunk_strategy_values():
     assert ChunkStrategy.PARAGRAPH == "paragraph"
@@ -135,6 +136,7 @@ def test_embedding_provider_values():
 # ---------------------------------------------------------------------------
 # Tests: Settings validation
 # ---------------------------------------------------------------------------
+
 
 class TestSettingsValidation:
     def test_llm_enabled_missing_api_key_raises(self):
@@ -200,6 +202,7 @@ class TestSettingsValidation:
 # Tests: _normalize
 # ---------------------------------------------------------------------------
 
+
 class TestNormalize:
     def test_unit_vector(self):
         v = [3.0, 4.0, 0.0, 0.0]
@@ -215,12 +218,14 @@ class TestNormalize:
 class TestParseIsoDateTime:
     def test_parse_datetime_instance_with_tz(self):
         from datetime import datetime, timezone
+
         dt = datetime.now(timezone.utc)
         out = _parse_iso_datetime(dt)
         assert out.tzinfo is not None
 
     def test_parse_datetime_instance_without_tz(self):
         from datetime import datetime, timezone
+
         dt = datetime.now(timezone.utc).replace(tzinfo=None)
         out = _parse_iso_datetime(dt)
         assert out.tzinfo is not None
@@ -242,6 +247,7 @@ class TestParseIsoDateTime:
 # Tests: create_embedding dispatch
 # ---------------------------------------------------------------------------
 
+
 class TestCreateEmbedding:
     @pytest.mark.asyncio
     async def test_empty_string_raises(self):
@@ -255,19 +261,26 @@ class TestCreateEmbedding:
 
     @pytest.mark.asyncio
     async def test_routes_to_ollama(self):
-        with patch("src.utils.settings", _fake_settings(EMBEDDING_PROVIDER=EmbeddingProvider.OLLAMA)), \
-             patch("src.utils._create_ollama_embedding", new_callable=AsyncMock, return_value=EMBED_A) as mock_o:
+        with (
+            patch("src.utils.settings", _fake_settings(EMBEDDING_PROVIDER=EmbeddingProvider.OLLAMA)),
+            patch("src.utils._create_ollama_embedding", new_callable=AsyncMock, return_value=EMBED_A) as mock_o,
+        ):
             result = await create_embedding("hello")
         mock_o.assert_called_once_with("hello")
         assert result == EMBED_A
 
     @pytest.mark.asyncio
     async def test_routes_to_openai(self):
-        with patch("src.utils.settings", _fake_settings(
-            EMBEDDING_PROVIDER=EmbeddingProvider.OPENAI,
-            OPENAI_API_KEY="sk-test",
-        )), \
-             patch("src.utils._create_openai_embedding", new_callable=AsyncMock, return_value=EMBED_A) as mock_oa:
+        with (
+            patch(
+                "src.utils.settings",
+                _fake_settings(
+                    EMBEDDING_PROVIDER=EmbeddingProvider.OPENAI,
+                    OPENAI_API_KEY="sk-test",
+                ),
+            ),
+            patch("src.utils._create_openai_embedding", new_callable=AsyncMock, return_value=EMBED_A) as mock_oa,
+        ):
             result = await create_embedding("hello")
         mock_oa.assert_called_once_with("hello")
         assert result == EMBED_A
@@ -276,6 +289,7 @@ class TestCreateEmbedding:
 # ---------------------------------------------------------------------------
 # Tests: _create_ollama_embedding
 # ---------------------------------------------------------------------------
+
 
 class TestOllamaEmbedding:
     def _make_client(self, side_effect=None, return_value=None):
@@ -300,69 +314,82 @@ class TestOllamaEmbedding:
         mock_resp.json.return_value = {"embedding": raw}
         mc = self._make_client(return_value=mock_resp)
 
-        with patch("src.utils.settings", _fake_settings()), \
-             patch("src.utils.httpx.AsyncClient", return_value=mc):
+        with patch("src.utils.settings", _fake_settings()), patch("src.utils.httpx.AsyncClient", return_value=mc):
             result = await _create_ollama_embedding("test")
         assert result == _normalize(raw)
 
     @pytest.mark.asyncio
     async def test_retry_on_timeout_then_success(self):
         import httpx as httpx_lib
+
         raw = [1.0, 0.0, 0.0, 0.0]
         success_resp = MagicMock()
         success_resp.raise_for_status = MagicMock()
         success_resp.json.return_value = {"embedding": raw}
-        mc = self._make_client(side_effect=[
-            httpx_lib.TimeoutException("timeout"),
-            success_resp,
-        ])
+        mc = self._make_client(
+            side_effect=[
+                httpx_lib.TimeoutException("timeout"),
+                success_resp,
+            ]
+        )
 
-        with patch("src.utils.settings", _fake_settings(OLLAMA_MAX_RETRIES=2, OLLAMA_RETRY_DELAY_SECONDS=0.001)), \
-             patch("src.utils.httpx.AsyncClient", return_value=mc), \
-             patch("src.utils.asyncio.sleep", new_callable=AsyncMock):
+        with (
+            patch("src.utils.settings", _fake_settings(OLLAMA_MAX_RETRIES=2, OLLAMA_RETRY_DELAY_SECONDS=0.001)),
+            patch("src.utils.httpx.AsyncClient", return_value=mc),
+            patch("src.utils.asyncio.sleep", new_callable=AsyncMock),
+        ):
             result = await _create_ollama_embedding("test")
         assert result == _normalize(raw)
 
     @pytest.mark.asyncio
     async def test_connect_error_retry_then_success(self):
         import httpx as httpx_lib
+
         raw = [0.0, 1.0, 0.0, 0.0]
         success_resp = MagicMock()
         success_resp.raise_for_status = MagicMock()
         success_resp.json.return_value = {"embedding": raw}
-        mc = self._make_client(side_effect=[
-            httpx_lib.ConnectError("conn refused"),
-            success_resp,
-        ])
+        mc = self._make_client(
+            side_effect=[
+                httpx_lib.ConnectError("conn refused"),
+                success_resp,
+            ]
+        )
 
-        with patch("src.utils.settings", _fake_settings(OLLAMA_MAX_RETRIES=2, OLLAMA_RETRY_DELAY_SECONDS=0.001)), \
-             patch("src.utils.httpx.AsyncClient", return_value=mc), \
-             patch("src.utils.asyncio.sleep", new_callable=AsyncMock):
+        with (
+            patch("src.utils.settings", _fake_settings(OLLAMA_MAX_RETRIES=2, OLLAMA_RETRY_DELAY_SECONDS=0.001)),
+            patch("src.utils.httpx.AsyncClient", return_value=mc),
+            patch("src.utils.asyncio.sleep", new_callable=AsyncMock),
+        ):
             result = await _create_ollama_embedding("test")
         assert result == _normalize(raw)
 
     @pytest.mark.asyncio
     async def test_max_retries_exceeded_raises(self):
         import httpx as httpx_lib
+
         mc = self._make_client(side_effect=httpx_lib.TimeoutException("timeout"))
 
-        with patch("src.utils.settings", _fake_settings(OLLAMA_MAX_RETRIES=2, OLLAMA_RETRY_DELAY_SECONDS=0.001)), \
-             patch("src.utils.httpx.AsyncClient", return_value=mc), \
-             patch("src.utils.asyncio.sleep", new_callable=AsyncMock):
+        with (
+            patch("src.utils.settings", _fake_settings(OLLAMA_MAX_RETRIES=2, OLLAMA_RETRY_DELAY_SECONDS=0.001)),
+            patch("src.utils.httpx.AsyncClient", return_value=mc),
+            patch("src.utils.asyncio.sleep", new_callable=AsyncMock),
+        ):
             with pytest.raises(EmbeddingError):
                 await _create_ollama_embedding("test")
 
     @pytest.mark.asyncio
     async def test_http_status_error_raises(self):
         import httpx as httpx_lib
+
         error_resp = MagicMock()
         error_resp.status_code = 500
-        mc = self._make_client(side_effect=httpx_lib.HTTPStatusError(
-            "error", request=MagicMock(), response=error_resp
-        ))
+        mc = self._make_client(side_effect=httpx_lib.HTTPStatusError("error", request=MagicMock(), response=error_resp))
 
-        with patch("src.utils.settings", _fake_settings(OLLAMA_MAX_RETRIES=1)), \
-             patch("src.utils.httpx.AsyncClient", return_value=mc):
+        with (
+            patch("src.utils.settings", _fake_settings(OLLAMA_MAX_RETRIES=1)),
+            patch("src.utils.httpx.AsyncClient", return_value=mc),
+        ):
             with pytest.raises(EmbeddingError):
                 await _create_ollama_embedding("test")
 
@@ -373,8 +400,10 @@ class TestOllamaEmbedding:
         mock_resp.json.return_value = {"embedding": None}
         mc = self._make_client(return_value=mock_resp)
 
-        with patch("src.utils.settings", _fake_settings(OLLAMA_MAX_RETRIES=1)), \
-             patch("src.utils.httpx.AsyncClient", return_value=mc):
+        with (
+            patch("src.utils.settings", _fake_settings(OLLAMA_MAX_RETRIES=1)),
+            patch("src.utils.httpx.AsyncClient", return_value=mc),
+        ):
             with pytest.raises(EmbeddingError):
                 await _create_ollama_embedding("test")
 
@@ -385,8 +414,10 @@ class TestOllamaEmbedding:
         mock_resp.json.return_value = {"embedding": "not-a-list"}
         mc = self._make_client(return_value=mock_resp)
 
-        with patch("src.utils.settings", _fake_settings(OLLAMA_MAX_RETRIES=1)), \
-             patch("src.utils.httpx.AsyncClient", return_value=mc):
+        with (
+            patch("src.utils.settings", _fake_settings(OLLAMA_MAX_RETRIES=1)),
+            patch("src.utils.httpx.AsyncClient", return_value=mc),
+        ):
             with pytest.raises(EmbeddingError):
                 await _create_ollama_embedding("test")
 
@@ -394,8 +425,10 @@ class TestOllamaEmbedding:
     async def test_unexpected_exception_raises(self):
         mc = self._make_client(side_effect=RuntimeError("unexpected"))
 
-        with patch("src.utils.settings", _fake_settings(OLLAMA_MAX_RETRIES=1)), \
-             patch("src.utils.httpx.AsyncClient", return_value=mc):
+        with (
+            patch("src.utils.settings", _fake_settings(OLLAMA_MAX_RETRIES=1)),
+            patch("src.utils.httpx.AsyncClient", return_value=mc),
+        ):
             with pytest.raises(EmbeddingError):
                 await _create_ollama_embedding("test")
 
@@ -404,39 +437,50 @@ class TestOllamaEmbedding:
 # Tests: _create_openai_embedding
 # ---------------------------------------------------------------------------
 
+
 class TestOpenAIEmbedding:
     @pytest.mark.asyncio
     async def test_success(self):
         mock_client = AsyncMock()
-        mock_client.embeddings.create = AsyncMock(return_value=MagicMock(
-            data=[MagicMock(embedding=[1.0, 0.0, 0.0, 0.0])]
-        ))
+        mock_client.embeddings.create = AsyncMock(
+            return_value=MagicMock(data=[MagicMock(embedding=[1.0, 0.0, 0.0, 0.0])])
+        )
         mock_client.close = AsyncMock()
 
-        with patch("src.utils.settings", _fake_settings(
-            EMBEDDING_PROVIDER=EmbeddingProvider.OPENAI,
-            OPENAI_API_KEY="sk-test",
-            OPENAI_EMBED_MODEL="text-embedding-3-small",
-            OPENAI_BASE_URL=None,
-        )), \
-             patch("src.utils.AsyncOpenAI", return_value=mock_client):
+        with (
+            patch(
+                "src.utils.settings",
+                _fake_settings(
+                    EMBEDDING_PROVIDER=EmbeddingProvider.OPENAI,
+                    OPENAI_API_KEY="sk-test",
+                    OPENAI_EMBED_MODEL="text-embedding-3-small",
+                    OPENAI_BASE_URL=None,
+                ),
+            ),
+            patch("src.utils.AsyncOpenAI", return_value=mock_client),
+        ):
             result = await _create_openai_embedding("hello")
         assert result == _normalize([1.0, 0.0, 0.0, 0.0])
 
     @pytest.mark.asyncio
     async def test_with_custom_base_url(self):
         mock_client = AsyncMock()
-        mock_client.embeddings.create = AsyncMock(return_value=MagicMock(
-            data=[MagicMock(embedding=[0.0, 1.0, 0.0, 0.0])]
-        ))
+        mock_client.embeddings.create = AsyncMock(
+            return_value=MagicMock(data=[MagicMock(embedding=[0.0, 1.0, 0.0, 0.0])])
+        )
         mock_client.close = AsyncMock()
 
-        with patch("src.utils.settings", _fake_settings(
-            EMBEDDING_PROVIDER=EmbeddingProvider.OPENAI,
-            OPENAI_API_KEY="sk-test",
-            OPENAI_BASE_URL="http://custom:11434",
-        )), \
-             patch("src.utils.AsyncOpenAI", return_value=mock_client) as MockOA:
+        with (
+            patch(
+                "src.utils.settings",
+                _fake_settings(
+                    EMBEDDING_PROVIDER=EmbeddingProvider.OPENAI,
+                    OPENAI_API_KEY="sk-test",
+                    OPENAI_BASE_URL="http://custom:11434",
+                ),
+            ),
+            patch("src.utils.AsyncOpenAI", return_value=mock_client) as MockOA,
+        ):
             await _create_openai_embedding("hello")
         call_kwargs = MockOA.call_args[1]
         assert call_kwargs.get("base_url") == "http://custom:11434"
@@ -447,11 +491,16 @@ class TestOpenAIEmbedding:
         mock_client.embeddings.create = AsyncMock(side_effect=Exception("API down"))
         mock_client.close = AsyncMock()
 
-        with patch("src.utils.settings", _fake_settings(
-            EMBEDDING_PROVIDER=EmbeddingProvider.OPENAI,
-            OPENAI_API_KEY="sk-test",
-        )), \
-             patch("src.utils.AsyncOpenAI", return_value=mock_client):
+        with (
+            patch(
+                "src.utils.settings",
+                _fake_settings(
+                    EMBEDDING_PROVIDER=EmbeddingProvider.OPENAI,
+                    OPENAI_API_KEY="sk-test",
+                ),
+            ),
+            patch("src.utils.AsyncOpenAI", return_value=mock_client),
+        ):
             with pytest.raises(EmbeddingError):
                 await _create_openai_embedding("hello")
 
@@ -459,6 +508,7 @@ class TestOpenAIEmbedding:
 # ---------------------------------------------------------------------------
 # Tests: create_embeddings_batch
 # ---------------------------------------------------------------------------
+
 
 class TestBatchEmbedding:
     @pytest.mark.asyncio
@@ -477,21 +527,18 @@ class TestBatchEmbedding:
 # Tests: generate_contextual_text
 # ---------------------------------------------------------------------------
 
+
 class TestContextualText:
     @pytest.mark.asyncio
     async def test_disabled_returns_original(self):
-        with patch("src.utils.settings", _fake_settings(
-            USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False
-        )):
+        with patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)):
             text, enriched = await generate_contextual_text("doc", "chunk")
         assert text == "chunk"
         assert enriched is False
 
     @pytest.mark.asyncio
     async def test_llm_disabled_returns_original(self):
-        with patch("src.utils.settings", _fake_settings(
-            USE_CONTEXTUAL_EMBEDDINGS=True, LLM_ENABLED=False
-        )):
+        with patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=True, LLM_ENABLED=False)):
             text, enriched = await generate_contextual_text("doc", "chunk")
         assert text == "chunk"
         assert enriched is False
@@ -499,20 +546,25 @@ class TestContextualText:
     @pytest.mark.asyncio
     async def test_llm_enriches_text(self):
         mock_client = AsyncMock()
-        mock_client.chat.completions.create = AsyncMock(return_value=MagicMock(
-            choices=[MagicMock(message=MagicMock(content="great context"))]
-        ))
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content="great context"))])
+        )
         mock_client.close = AsyncMock()
 
-        with patch("src.utils.settings", _fake_settings(
-            USE_CONTEXTUAL_EMBEDDINGS=True,
-            LLM_ENABLED=True,
-            LLM_API_KEY="key",
-            LLM_BASE_URL="http://llm",
-            LLM_MODEL_NAME="model",
-            CHUNK_SIZE=1000,
-        )), \
-             patch("src.utils.AsyncOpenAI", return_value=mock_client):
+        with (
+            patch(
+                "src.utils.settings",
+                _fake_settings(
+                    USE_CONTEXTUAL_EMBEDDINGS=True,
+                    LLM_ENABLED=True,
+                    LLM_API_KEY="key",
+                    LLM_BASE_URL="http://llm",
+                    LLM_MODEL_NAME="model",
+                    CHUNK_SIZE=1000,
+                ),
+            ),
+            patch("src.utils.AsyncOpenAI", return_value=mock_client),
+        ):
             text, enriched = await generate_contextual_text("full doc", "chunk text")
         assert enriched is True
         assert "great context" in text
@@ -521,33 +573,43 @@ class TestContextualText:
     @pytest.mark.asyncio
     async def test_llm_empty_response_returns_original(self):
         mock_client = AsyncMock()
-        mock_client.chat.completions.create = AsyncMock(return_value=MagicMock(
-            choices=[MagicMock(message=MagicMock(content="  "))]
-        ))
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content="  "))])
+        )
         mock_client.close = AsyncMock()
 
-        with patch("src.utils.settings", _fake_settings(
-            USE_CONTEXTUAL_EMBEDDINGS=True,
-            LLM_ENABLED=True,
-            LLM_API_KEY="key",
-            LLM_BASE_URL="http://llm",
-            LLM_MODEL_NAME="model",
-        )), \
-             patch("src.utils.AsyncOpenAI", return_value=mock_client):
+        with (
+            patch(
+                "src.utils.settings",
+                _fake_settings(
+                    USE_CONTEXTUAL_EMBEDDINGS=True,
+                    LLM_ENABLED=True,
+                    LLM_API_KEY="key",
+                    LLM_BASE_URL="http://llm",
+                    LLM_MODEL_NAME="model",
+                ),
+            ),
+            patch("src.utils.AsyncOpenAI", return_value=mock_client),
+        ):
             text, enriched = await generate_contextual_text("doc", "chunk")
         assert text == "chunk"
         assert enriched is False
 
     @pytest.mark.asyncio
     async def test_llm_exception_returns_original(self):
-        with patch("src.utils.settings", _fake_settings(
-            USE_CONTEXTUAL_EMBEDDINGS=True,
-            LLM_ENABLED=True,
-            LLM_API_KEY="key",
-            LLM_BASE_URL="http://llm",
-            LLM_MODEL_NAME="model",
-        )), \
-             patch("src.utils.AsyncOpenAI", side_effect=Exception("LLM down")):
+        with (
+            patch(
+                "src.utils.settings",
+                _fake_settings(
+                    USE_CONTEXTUAL_EMBEDDINGS=True,
+                    LLM_ENABLED=True,
+                    LLM_API_KEY="key",
+                    LLM_BASE_URL="http://llm",
+                    LLM_MODEL_NAME="model",
+                ),
+            ),
+            patch("src.utils.AsyncOpenAI", side_effect=Exception("LLM down")),
+        ):
             text, enriched = await generate_contextual_text("doc", "chunk")
         assert text == "chunk"
         assert enriched is False
@@ -556,6 +618,7 @@ class TestContextualText:
 # ---------------------------------------------------------------------------
 # Tests: upsert_source
 # ---------------------------------------------------------------------------
+
 
 class TestUpsertSource:
     def test_existing_source_returns_id(self):
@@ -583,6 +646,7 @@ class TestUpsertSource:
 # Tests: add_documents_to_db
 # ---------------------------------------------------------------------------
 
+
 class TestAddDocumentsToDb:
     @pytest.mark.asyncio
     async def test_empty_urls_returns_zero(self):
@@ -594,9 +658,7 @@ class TestAddDocumentsToDb:
     @pytest.mark.asyncio
     async def test_length_mismatch_returns_zero(self):
         session = MagicMock()
-        result = await add_documents_to_db(
-            session, ["url1", "url2"], ["content1"], [{}], [0]
-        )
+        result = await add_documents_to_db(session, ["url1", "url2"], ["content1"], [{}], [0])
         assert result == 0
 
     @pytest.mark.asyncio
@@ -604,9 +666,11 @@ class TestAddDocumentsToDb:
         session = MagicMock()
         session.exec.return_value.all.return_value = []
 
-        with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
-             patch("src.utils.upsert_source", return_value=1), \
-             patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)):
+        with (
+            patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
+            patch("src.utils.upsert_source", return_value=1),
+            patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)),
+        ):
             result = await add_documents_to_db(
                 session,
                 ["url1", "url2"],
@@ -621,9 +685,11 @@ class TestAddDocumentsToDb:
         session = MagicMock()
         session.exec.return_value.all.return_value = []
 
-        with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
-             patch("src.utils.upsert_source", return_value=1), \
-             patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)):
+        with (
+            patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
+            patch("src.utils.upsert_source", return_value=1),
+            patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)),
+        ):
             result = await add_documents_to_db(
                 session, ["http://x.com/page"], ["some content"], [{"source": "x.com"}], [0]
             )
@@ -641,11 +707,11 @@ class TestAddDocumentsToDb:
 
         session.add_all.side_effect = capture_add_all
 
-        with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
-             patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)):
-            result = await add_documents_to_db(
-                session, ["url"], ["content"], [{}], [0]
-            )
+        with (
+            patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
+            patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)),
+        ):
+            result = await add_documents_to_db(session, ["url"], ["content"], [{}], [0])
         assert result == 1
         assert added_rows[0].source_id is None
 
@@ -654,27 +720,28 @@ class TestAddDocumentsToDb:
         session = MagicMock()
         session.exec.return_value.all.return_value = []
 
-        with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, side_effect=EmbeddingError("fail")), \
-             patch("src.utils.settings", _fake_settings()):
-            result = await add_documents_to_db(
-                session, ["url"], ["content"], [{"source": "x"}], [0]
-            )
+        with (
+            patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, side_effect=EmbeddingError("fail")),
+            patch("src.utils.settings", _fake_settings()),
+        ):
+            result = await add_documents_to_db(session, ["url"], ["content"], [{"source": "x"}], [0])
         assert result == 0
         session.add_all.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_db_insert_error_rolls_back(self):
         from sqlalchemy.exc import SQLAlchemyError
+
         session = MagicMock()
         session.exec.return_value.all.return_value = []
         session.add_all.side_effect = SQLAlchemyError("insert fail")
 
-        with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
-             patch("src.utils.upsert_source", return_value=1), \
-             patch("src.utils.settings", _fake_settings()):
-            result = await add_documents_to_db(
-                session, ["url"], ["content"], [{"source": "x"}], [0]
-            )
+        with (
+            patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
+            patch("src.utils.upsert_source", return_value=1),
+            patch("src.utils.settings", _fake_settings()),
+        ):
+            result = await add_documents_to_db(session, ["url"], ["content"], [{"source": "x"}], [0])
         assert result == 0
         session.rollback.assert_called()
 
@@ -683,16 +750,29 @@ class TestAddDocumentsToDb:
         session = MagicMock()
         session.exec.return_value.all.return_value = []
 
-        with patch("src.utils.generate_contextual_text", new_callable=AsyncMock,
-                   return_value=("enriched content", True)) as mock_ctx, \
-             patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
-             patch("src.utils.upsert_source", return_value=1), \
-             patch("src.utils.settings", _fake_settings(
-                 USE_CONTEXTUAL_EMBEDDINGS=True, LLM_ENABLED=True,
-                 LLM_API_KEY="k", LLM_BASE_URL="u", LLM_MODEL_NAME="m",
-             )):
+        with (
+            patch(
+                "src.utils.generate_contextual_text", new_callable=AsyncMock, return_value=("enriched content", True)
+            ) as mock_ctx,
+            patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
+            patch("src.utils.upsert_source", return_value=1),
+            patch(
+                "src.utils.settings",
+                _fake_settings(
+                    USE_CONTEXTUAL_EMBEDDINGS=True,
+                    LLM_ENABLED=True,
+                    LLM_API_KEY="k",
+                    LLM_BASE_URL="u",
+                    LLM_MODEL_NAME="m",
+                ),
+            ),
+        ):
             result = await add_documents_to_db(
-                session, ["url"], ["content"], [{"source": "x"}], [0],
+                session,
+                ["url"],
+                ["content"],
+                [{"source": "x"}],
+                [0],
                 full_documents=["full doc"],
             )
         mock_ctx.assert_called_once()
@@ -701,6 +781,7 @@ class TestAddDocumentsToDb:
     @pytest.mark.asyncio
     async def test_delete_existing_sql_error_logs_and_continues(self):
         from sqlalchemy.exc import SQLAlchemyError
+
         session = MagicMock()
         existing_page = MagicMock()
         call_count = {"n": 0}
@@ -714,12 +795,12 @@ class TestAddDocumentsToDb:
         session.exec.side_effect = mock_exec
         session.delete.side_effect = SQLAlchemyError("delete fail")
 
-        with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
-             patch("src.utils.upsert_source", return_value=1), \
-             patch("src.utils.settings", _fake_settings()):
-            await add_documents_to_db(
-                session, ["url"], ["content"], [{"source": "x"}], [0]
-            )
+        with (
+            patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
+            patch("src.utils.upsert_source", return_value=1),
+            patch("src.utils.settings", _fake_settings()),
+        ):
+            await add_documents_to_db(session, ["url"], ["content"], [{"source": "x"}], [0])
         session.rollback.assert_called()
 
     @pytest.mark.asyncio
@@ -736,9 +817,11 @@ class TestAddDocumentsToDb:
             embed_calls.append(len(texts))
             return [EMBED_A] * len(texts)
 
-        with patch("src.utils.create_embeddings_batch", side_effect=mock_batch), \
-             patch("src.utils.upsert_source", return_value=1), \
-             patch("src.utils.settings", _fake_settings(BATCH_SIZE=2)):
+        with (
+            patch("src.utils.create_embeddings_batch", side_effect=mock_batch),
+            patch("src.utils.upsert_source", return_value=1),
+            patch("src.utils.settings", _fake_settings(BATCH_SIZE=2)),
+        ):
             result = await add_documents_to_db(session, urls, contents, metas, chunks)
         assert result == 5
         assert len(embed_calls) == 3  # 2+2+1
@@ -750,14 +833,23 @@ class TestAddDocumentsToDb:
         added_rows = []
         session.add_all.side_effect = lambda rows: added_rows.extend(rows)
 
-        with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
-             patch("src.utils.upsert_source", return_value=1), \
-             patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)):
+        with (
+            patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
+            patch("src.utils.upsert_source", return_value=1),
+            patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)),
+        ):
             result = await add_documents_to_db(
                 session,
                 ["https://x.com/page"],
                 ["phase9 content"],
-                [{"source": "x.com", "content_class": "structured", "crawl_timestamp": "2026-04-04T10:00:00+00:00", "run_id": "run-abc"}],
+                [
+                    {
+                        "source": "x.com",
+                        "content_class": "structured",
+                        "crawl_timestamp": "2026-04-04T10:00:00+00:00",
+                        "run_id": "run-abc",
+                    }
+                ],
                 [0],
             )
 
@@ -776,18 +868,22 @@ class TestAddDocumentsToDb:
         added_rows = []
         session.add_all.side_effect = lambda rows: added_rows.extend(rows)
 
-        with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
-             patch("src.utils.upsert_source", return_value=1), \
-             patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)):
+        with (
+            patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
+            patch("src.utils.upsert_source", return_value=1),
+            patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)),
+        ):
             result = await add_documents_to_db(
                 session,
                 ["https://x.com/page"],
                 ["content with refs"],
-                [{
-                    "source": "x.com",
-                    "references_markdown": "[1]: https://example.com/ref Example reference",
-                    "has_citations": True,
-                }],
+                [
+                    {
+                        "source": "x.com",
+                        "references_markdown": "[1]: https://example.com/ref Example reference",
+                        "has_citations": True,
+                    }
+                ],
                 [0],
             )
 
@@ -805,8 +901,10 @@ class TestAddDocumentsToDb:
         added_rows = []
         session.add_all.side_effect = lambda rows: added_rows.extend(rows)
 
-        with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
-             patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)):
+        with (
+            patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
+            patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)),
+        ):
             result = await add_documents_to_db(
                 session,
                 ["https://x.com/page"],
@@ -826,6 +924,7 @@ class TestAddDocumentsToDb:
 # Tests: add_code_examples_to_db
 # ---------------------------------------------------------------------------
 
+
 class TestAddCodeExamplesToDb:
     @pytest.mark.asyncio
     async def test_empty_returns_zero(self):
@@ -838,8 +937,10 @@ class TestAddCodeExamplesToDb:
         session = MagicMock()
         session.exec.return_value.all.return_value = []
 
-        with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
-             patch("src.utils.upsert_source", return_value=1):
+        with (
+            patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
+            patch("src.utils.upsert_source", return_value=1),
+        ):
             result = await add_code_examples_to_db(
                 session,
                 urls=["http://x.com"],
@@ -860,9 +961,7 @@ class TestAddCodeExamplesToDb:
         session.add_all.side_effect = lambda rows: added_rows.extend(rows)
 
         with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]):
-            result = await add_code_examples_to_db(
-                session, ["url"], ["code"], [None], [None], [{}], [0]
-            )
+            result = await add_code_examples_to_db(session, ["url"], ["code"], [None], [None], [{}], [0])
         assert result == 1
         assert added_rows[0].source_id is None
 
@@ -872,39 +971,39 @@ class TestAddCodeExamplesToDb:
         session.exec.return_value.all.return_value = []
 
         with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, side_effect=EmbeddingError("bad")):
-            result = await add_code_examples_to_db(
-                session, ["url"], ["code"], [None], [None], [{}], [0]
-            )
+            result = await add_code_examples_to_db(session, ["url"], ["code"], [None], [None], [{}], [0])
         assert result == 0
 
     @pytest.mark.asyncio
     async def test_db_insert_error_rolls_back(self):
         from sqlalchemy.exc import SQLAlchemyError
+
         session = MagicMock()
         session.exec.return_value.all.return_value = []
         session.add_all.side_effect = SQLAlchemyError("insert fail")
 
-        with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
-             patch("src.utils.upsert_source", return_value=1):
-            result = await add_code_examples_to_db(
-                session, ["url"], ["code"], [None], [None], [{"source": "x"}], [0]
-            )
+        with (
+            patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
+            patch("src.utils.upsert_source", return_value=1),
+        ):
+            result = await add_code_examples_to_db(session, ["url"], ["code"], [None], [None], [{"source": "x"}], [0])
         assert result == 0
         session.rollback.assert_called()
 
     @pytest.mark.asyncio
     async def test_delete_sql_error_rolls_back(self):
         from sqlalchemy.exc import SQLAlchemyError
+
         session = MagicMock()
         existing = MagicMock()
         session.exec.return_value.all.return_value = [existing]
         session.delete.side_effect = SQLAlchemyError("delete fail")
 
-        with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
-             patch("src.utils.upsert_source", return_value=1):
-            await add_code_examples_to_db(
-                session, ["url"], ["code"], [None], [None], [{"source": "x"}], [0]
-            )
+        with (
+            patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
+            patch("src.utils.upsert_source", return_value=1),
+        ):
+            await add_code_examples_to_db(session, ["url"], ["code"], [None], [None], [{"source": "x"}], [0])
         session.rollback.assert_called()
 
     @pytest.mark.asyncio
@@ -914,8 +1013,10 @@ class TestAddCodeExamplesToDb:
         added_rows = []
         session.add_all.side_effect = lambda rows: added_rows.extend(rows)
 
-        with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
-             patch("src.utils.upsert_source", return_value=1):
+        with (
+            patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
+            patch("src.utils.upsert_source", return_value=1),
+        ):
             result = await add_code_examples_to_db(
                 session,
                 urls=["https://x.com"],
@@ -936,6 +1037,7 @@ class TestAddCodeExamplesToDb:
 # ---------------------------------------------------------------------------
 # Tests: search_documents
 # ---------------------------------------------------------------------------
+
 
 class TestSearchDocuments:
     @pytest.mark.asyncio
@@ -958,10 +1060,10 @@ class TestSearchDocuments:
         assert result == []
 
 
-
 # ---------------------------------------------------------------------------
 # Tests: _python_side_vector_search
 # ---------------------------------------------------------------------------
+
 
 class TestPythonSideVectorSearch:
     def _make_page(self, pid, url, embedding, metadata=None):
@@ -1034,6 +1136,7 @@ class TestPythonSideVectorSearch:
 # Tests: search_code_examples
 # ---------------------------------------------------------------------------
 
+
 class TestSearchCodeExamples:
     @pytest.mark.asyncio
     async def test_empty_query_returns_empty(self):
@@ -1071,10 +1174,10 @@ class TestSearchCodeExamples:
         assert result == []
 
 
-
 # ---------------------------------------------------------------------------
 # Tests: rerank_results
 # ---------------------------------------------------------------------------
+
 
 class TestRerankResults:
     def test_disabled_returns_top_k_original_order(self):
@@ -1105,8 +1208,10 @@ class TestRerankResults:
                 return m
             return original_import(name, *args, **kwargs)
 
-        with patch("src.utils.settings", _fake_settings(USE_RERANKING=True)), \
-             patch.object(builtins, "__import__", side_effect=mock_import):
+        with (
+            patch("src.utils.settings", _fake_settings(USE_RERANKING=True)),
+            patch.object(builtins, "__import__", side_effect=mock_import),
+        ):
             out = rerank_results("query", results, top_k=2)
         assert len(out) == 2
         mock_ce_instance.predict.assert_called_once()
@@ -1120,8 +1225,10 @@ class TestRerankResults:
                 raise ImportError("not installed")
             return original_import(name, *args, **kwargs)
 
-        with patch("src.utils.settings", _fake_settings(USE_RERANKING=True)), \
-             patch.object(builtins, "__import__", side_effect=bad_import):
+        with (
+            patch("src.utils.settings", _fake_settings(USE_RERANKING=True)),
+            patch.object(builtins, "__import__", side_effect=bad_import),
+        ):
             out = rerank_results("query", results, top_k=3)
         assert len(out) == 3
 
@@ -1140,8 +1247,10 @@ class TestRerankResults:
                 return m
             return original_import(name, *args, **kwargs)
 
-        with patch("src.utils.settings", _fake_settings(USE_RERANKING=True)), \
-             patch.object(builtins, "__import__", side_effect=mock_import):
+        with (
+            patch("src.utils.settings", _fake_settings(USE_RERANKING=True)),
+            patch.object(builtins, "__import__", side_effect=mock_import),
+        ):
             out = rerank_results("q", results, top_k=2)
         assert out[0]["id"] == 2
         assert out[0]["rerank_score"] == 0.8
@@ -1150,6 +1259,7 @@ class TestRerankResults:
 # ---------------------------------------------------------------------------
 # Tests: extract_code_blocks
 # ---------------------------------------------------------------------------
+
 
 class TestExtractCodeBlocks:
     def test_simple_python_block(self):
@@ -1212,6 +1322,7 @@ class TestExtractLinkReferences:
 # Tests: get_session
 # ---------------------------------------------------------------------------
 
+
 class TestGetSession:
     def test_yields_session(self):
         mock_session = MagicMock()
@@ -1231,6 +1342,7 @@ class TestGetSession:
 # Extra coverage: add_documents_to_db — all-whitespace branch (line 326)
 # and delete-commit branch (line 337)
 # ---------------------------------------------------------------------------
+
 
 class TestAddDocumentsExtraCoverage:
     @pytest.mark.asyncio
@@ -1254,12 +1366,12 @@ class TestAddDocumentsExtraCoverage:
         existing_page = MagicMock()
         session.exec.return_value.all.return_value = [existing_page]
 
-        with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
-             patch("src.utils.upsert_source", return_value=1), \
-             patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)):
-            result = await add_documents_to_db(
-                session, ["url"], ["content"], [{"source": "x"}], [0]
-            )
+        with (
+            patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
+            patch("src.utils.upsert_source", return_value=1),
+            patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)),
+        ):
+            result = await add_documents_to_db(session, ["url"], ["content"], [{"source": "x"}], [0])
         assert result == 1
         session.delete.assert_called_once_with(existing_page)
         # Two commits: delete + insert
@@ -1270,6 +1382,7 @@ class TestAddDocumentsExtraCoverage:
 # Extra coverage: add_code_examples_to_db — delete-commit branch (line 413)
 # ---------------------------------------------------------------------------
 
+
 class TestAddCodeExamplesExtraCoverage:
     @pytest.mark.asyncio
     async def test_delete_commit_when_existing_rows_found(self):
@@ -1278,8 +1391,10 @@ class TestAddCodeExamplesExtraCoverage:
         existing_example = MagicMock()
         session.exec.return_value.all.return_value = [existing_example]
 
-        with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
-             patch("src.utils.upsert_source", return_value=1):
+        with (
+            patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
+            patch("src.utils.upsert_source", return_value=1),
+        ):
             result = await add_code_examples_to_db(
                 session,
                 urls=["url"],
@@ -1297,6 +1412,7 @@ class TestAddCodeExamplesExtraCoverage:
 # ---------------------------------------------------------------------------
 # Extra coverage: search_documents — core search logic (lines 476-557)
 # ---------------------------------------------------------------------------
+
 
 class TestSearchDocumentsCore:
     @pytest.mark.asyncio
@@ -1333,8 +1449,10 @@ class TestSearchDocumentsCore:
         session = MagicMock()
         session.exec.side_effect = Exception("function not found")
 
-        with patch("src.utils.create_embedding", new_callable=AsyncMock, return_value=EMBED_Q), \
-             patch("src.utils._python_side_vector_search", return_value=[]) as mock_fallback:
+        with (
+            patch("src.utils.create_embedding", new_callable=AsyncMock, return_value=EMBED_Q),
+            patch("src.utils._python_side_vector_search", return_value=[]) as mock_fallback,
+        ):
             results = await search_documents(session, "query", use_hybrid=False)
 
         mock_fallback.assert_called_once()
@@ -1399,15 +1517,16 @@ class TestSearchDocumentsCore:
         row = (1, "http://x.com", 0, "content", {}, 0.9)
         session.exec.return_value.all.return_value = [row]
 
-        with patch("src.utils.create_embedding", new_callable=AsyncMock, return_value=EMBED_Q), \
-             patch("src.utils.settings", _fake_settings(USE_HYBRID_SEARCH=True)):
+        with (
+            patch("src.utils.create_embedding", new_callable=AsyncMock, return_value=EMBED_Q),
+            patch("src.utils.settings", _fake_settings(USE_HYBRID_SEARCH=True)),
+        ):
             # Explicitly pass use_hybrid=False to override the settings
             results = await search_documents(session, "query", use_hybrid=False)
 
         # Only one exec call (no FTS pass)
         assert session.exec.call_count == 1
         assert len(results) == 1
-
 
     # ---------------------------------------------------------------------------
     # Tests: compute_staleness_score
@@ -1430,7 +1549,6 @@ class TestSearchDocumentsCore:
             s_short = compute_staleness_score(30.0, half_life_days=30.0)
             s_long = compute_staleness_score(30.0, half_life_days=90.0)
             assert s_short > s_long
-
 
     # ---------------------------------------------------------------------------
     # Tests: compute_value_score
@@ -1470,7 +1588,6 @@ class TestSearchDocumentsCore:
         def test_zero_near_dup_sim(self):
             score = compute_value_score(hit_count=0, near_dup_sim=0.0, content_density=1.0)
             assert score > 0.0
-
 
     # ---------------------------------------------------------------------------
     # Tests: tombstone_records
@@ -1529,6 +1646,7 @@ class TestSearchDocumentsCore:
 
         def test_db_error_rolls_back_and_returns_zero(self):
             from sqlalchemy.exc import SQLAlchemyError
+
             session = MagicMock()
             session.exec.side_effect = SQLAlchemyError("db error")
 
@@ -1576,7 +1694,6 @@ class TestSearchDocumentsCore:
             assert len(added_logs) == 1
             assert added_logs[0].source == "code-source.com"
 
-
     # ---------------------------------------------------------------------------
     # Tests: _get_db_size_bytes
     # ---------------------------------------------------------------------------
@@ -1600,7 +1717,6 @@ class TestSearchDocumentsCore:
             result = _get_db_size_bytes(session)
             assert result == 0
 
-
     # ---------------------------------------------------------------------------
     # Tests: Phase 9.5 lifecycle fields in add_documents_to_db
     # ---------------------------------------------------------------------------
@@ -1608,15 +1724,16 @@ class TestSearchDocumentsCore:
     class TestAddDocumentsPhase95:
         @pytest.mark.asyncio
         async def test_lifecycle_fields_set_on_new_records(self):
-            from datetime import timezone as tz_
             session = MagicMock()
             session.exec.return_value.all.return_value = []
             added_rows = []
             session.add_all.side_effect = lambda rows: added_rows.extend(rows)
 
-            with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
-                 patch("src.utils.upsert_source", return_value=1), \
-                 patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)):
+            with (
+                patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
+                patch("src.utils.upsert_source", return_value=1),
+                patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)),
+            ):
                 result = await add_documents_to_db(
                     session,
                     ["https://x.com/page"],
@@ -1628,6 +1745,7 @@ class TestSearchDocumentsCore:
             assert result == 1
             row = added_rows[0]
             from datetime import datetime as dt_
+
             assert isinstance(row.first_seen_at, dt_)
             assert isinstance(row.last_seen_at, dt_)
             assert isinstance(row.last_crawled_at, dt_)
@@ -1635,7 +1753,9 @@ class TestSearchDocumentsCore:
 
         @pytest.mark.asyncio
         async def test_first_seen_preserved_on_reindex(self):
-            from datetime import datetime as dt_, timezone as tz_
+            from datetime import datetime as dt_
+            from datetime import timezone as tz_
+
             old_time = dt_(2025, 1, 1, tzinfo=tz_.utc)
             existing = MagicMock()
             existing.url = "https://x.com/page"
@@ -1647,9 +1767,11 @@ class TestSearchDocumentsCore:
             added_rows = []
             session.add_all.side_effect = lambda rows: added_rows.extend(rows)
 
-            with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
-                 patch("src.utils.upsert_source", return_value=1), \
-                 patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)):
+            with (
+                patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
+                patch("src.utils.upsert_source", return_value=1),
+                patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)),
+            ):
                 result = await add_documents_to_db(
                     session,
                     ["https://x.com/page"],
@@ -1665,8 +1787,11 @@ class TestSearchDocumentsCore:
         @pytest.mark.asyncio
         async def test_first_seen_cleared_on_delete_error(self):
             """When the delete-before-insert fails, first_seen_map is cleared → first_seen_at = now."""
+            from datetime import datetime as dt_
+            from datetime import timezone as tz_
+
             from sqlalchemy.exc import SQLAlchemyError
-            from datetime import datetime as dt_, timezone as tz_
+
             old_time = dt_(2025, 1, 1, tzinfo=tz_.utc)
             existing = MagicMock()
             existing.url = "https://x.com/page"
@@ -1678,9 +1803,11 @@ class TestSearchDocumentsCore:
             session.exec.side_effect = SQLAlchemyError("delete fail")
             added_rows = []
 
-            with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
-                 patch("src.utils.upsert_source", return_value=1), \
-                 patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)):
+            with (
+                patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
+                patch("src.utils.upsert_source", return_value=1),
+                patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)),
+            ):
                 # Error in delete means rollback; subsequent execution uses empty first_seen_map
                 # The function still attempts insert (delete error is non-fatal)
                 session.exec.side_effect = None  # reset so later exec calls work
@@ -1698,7 +1825,6 @@ class TestSearchDocumentsCore:
             # first_seen_at should be a recent timestamp (from _now), not old_time
             assert added_rows[0].first_seen_at >= old_time
 
-
     # ---------------------------------------------------------------------------
     # Tests: Phase 9.5 lifecycle fields in add_code_examples_to_db
     # ---------------------------------------------------------------------------
@@ -1707,13 +1833,16 @@ class TestSearchDocumentsCore:
         @pytest.mark.asyncio
         async def test_lifecycle_fields_set_on_code_examples(self):
             from datetime import datetime as dt_
+
             session = MagicMock()
             session.exec.return_value.all.return_value = []
             added_rows = []
             session.add_all.side_effect = lambda rows: added_rows.extend(rows)
 
-            with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
-                 patch("src.utils.upsert_source", return_value=1):
+            with (
+                patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
+                patch("src.utils.upsert_source", return_value=1),
+            ):
                 result = await add_code_examples_to_db(
                     session,
                     urls=["https://x.com"],
@@ -1732,7 +1861,9 @@ class TestSearchDocumentsCore:
 
         @pytest.mark.asyncio
         async def test_first_seen_preserved_on_code_reindex(self):
-            from datetime import datetime as dt_, timezone as tz_
+            from datetime import datetime as dt_
+            from datetime import timezone as tz_
+
             old_time = dt_(2025, 6, 1, tzinfo=tz_.utc)
             existing = MagicMock()
             existing.url = "https://x.com"
@@ -1744,8 +1875,10 @@ class TestSearchDocumentsCore:
             added_rows = []
             session.add_all.side_effect = lambda rows: added_rows.extend(rows)
 
-            with patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]), \
-                 patch("src.utils.upsert_source", return_value=1):
+            with (
+                patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
+                patch("src.utils.upsert_source", return_value=1),
+            ):
                 result = await add_code_examples_to_db(
                     session,
                     urls=["https://x.com"],
@@ -1758,7 +1891,6 @@ class TestSearchDocumentsCore:
 
             assert result == 1
             assert added_rows[0].first_seen_at == old_time
-
 
     # ---------------------------------------------------------------------------
     # Tests: _python_side_vector_search — inactive/tombstoned filters
@@ -1778,7 +1910,6 @@ class TestSearchDocumentsCore:
             return p
 
         def test_inactive_pages_excluded(self):
-            from datetime import datetime as dt_, timezone as tz_
             session = MagicMock()
             active = self._make_page(1, EMBED_A, is_active=True, tombstoned_at=None)
             inactive = self._make_page(2, EMBED_B, is_active=False, tombstoned_at=None)
@@ -1789,7 +1920,9 @@ class TestSearchDocumentsCore:
             assert 2 not in ids
 
         def test_tombstoned_pages_excluded(self):
-            from datetime import datetime as dt_, timezone as tz_
+            from datetime import datetime as dt_
+            from datetime import timezone as tz_
+
             session = MagicMock()
             alive = self._make_page(1, EMBED_A, is_active=True, tombstoned_at=None)
             dead = self._make_page(2, EMBED_B, is_active=True, tombstoned_at=dt_.now(tz_.utc))
@@ -1798,3 +1931,122 @@ class TestSearchDocumentsCore:
             ids = [r[0] for r in results]
             assert 1 in ids
             assert 2 not in ids
+
+
+class TestExtractRecordSource:
+    """L353: returns None when object has no valid metadata dict."""
+
+    def test_no_metadata_attributes_returns_none(self):
+        obj = MagicMock(spec=[])
+        assert _extract_record_source(obj) is None
+
+    def test_page_metadata_not_dict_returns_none(self):
+        obj = MagicMock()
+        obj.page_metadata = "not-a-dict"
+        del obj.ex_metadata
+        # ex_metadata absent, page_metadata not a dict → None
+        result = _extract_record_source(obj)
+        assert result is None
+
+
+class TestRequestContextualSummary:
+    """L509-510: early return when LLM_MODEL_NAME is falsy."""
+
+    @pytest.mark.asyncio
+    async def test_no_llm_model_name_returns_empty_string(self):
+        with patch("src.utils.settings") as mock_settings:
+            mock_settings.LLM_MODEL_NAME = ""
+            result = await _request_contextual_summary("doc", "chunk")
+        assert result == ""
+
+
+class TestUpsertSourceEdgeCases:
+    """L541, L548: ValueError when ids are None."""
+
+    def test_existing_row_with_none_id_raises(self):
+        session = MagicMock()
+        existing = MagicMock()
+        existing.id = None
+        session.exec.return_value.first.return_value = existing
+        with pytest.raises(ValueError, match="Existing source row missing id"):
+            upsert_source(session, "http://example.com")
+
+    def test_inserted_row_with_none_id_raises(self):
+        session = MagicMock()
+        session.exec.return_value.first.return_value = None
+        obj_instance = MagicMock()
+        obj_instance.id = None
+        with patch("src.utils.Source", return_value=obj_instance):
+            with patch("src.utils.select") as mock_select:
+                mock_select.return_value.where.return_value = MagicMock()
+                with pytest.raises(ValueError, match="Source insert did not return id"):
+                    upsert_source(session, "http://example.com")
+
+
+class TestResolveContentHash:
+    """L592: returns existing hash when meta already has one."""
+
+    def test_existing_hash_returned_unchanged(self):
+        result = _resolve_content_hash({"content_hash": "abc123"}, "content")
+        assert result == "abc123"
+
+
+class TestNormalizeSourceChangeId:
+    """L598: returns value when it's a non-empty string."""
+
+    def test_non_empty_string_returned(self):
+        assert _normalize_source_change_id("v1.2.3") == "v1.2.3"
+
+
+class TestResolveLinkReferences:
+    """L608: returns list value unchanged."""
+
+    def test_list_value_returned_as_is(self):
+        lst = [{"href": "https://example.com", "text": "link"}]
+        assert _resolve_link_references(lst, "") is lst
+
+
+class TestMergeVectorAndFtsRows:
+    """L1180: continue when FTS row id already in vector results."""
+
+    def test_duplicate_fts_row_id_is_skipped(self):
+        vector_results = [
+            {
+                "id": 1,
+                "url": "u",
+                "chunk_number": 0,
+                "content": "c",
+                "page_metadata": {},
+                "similarity_score": 0.9,
+                "fts_score": 0.0,
+            }
+        ]
+        fts_raw = [(1, "u", 0, "c", {}, 0.8)]  # same id → should be skipped
+        fts_map = {1: 0.8}
+        merged = _merge_vector_and_fts_rows(vector_results, fts_raw, fts_map)
+        assert len(merged) == 1
+        assert merged[1]["similarity_score"] == 0.9  # original preserved
+
+
+class TestQueryCodeExampleRows:
+    """L1287-1288: exception path returns empty list."""
+
+    def test_db_error_returns_empty_list(self):
+        session = MagicMock()
+        session.execute.side_effect = Exception("db error")
+        result = _query_code_example_rows(session, [0.1, 0.2], 5, "{}")
+        assert result == []
+
+
+class TestCodeExampleRowToResult:
+    """L1292: converts row tuple to dict."""
+
+    def test_row_converted_to_dict(self):
+        row = (42, "https://example.com", 0, "python", "code here", "summary text", {"k": "v"}, 0.95)
+        result = _code_example_row_to_result(row)
+        assert result["id"] == 42
+        assert result["url"] == "https://example.com"
+        assert result["language"] == "python"
+        assert result["content"] == "code here"
+        assert result["similarity_score"] == 0.95
+        assert result["metadata"] == {"k": "v"}

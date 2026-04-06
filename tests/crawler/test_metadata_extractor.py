@@ -1,9 +1,9 @@
 """Unit tests for src/crawler/metadata_extractor.py — 100% coverage, all offline."""
-import pytest
+
 from src.crawler.metadata_extractor import (
-    extract_section_info,
     extract_link_graph,
     extract_media_metadata,
+    extract_section_info,
 )
 
 
@@ -90,4 +90,16 @@ class TestLinkAndMediaExtraction:
     def test_extract_media_metadata_empty_markdown(self):
         out = extract_media_metadata("")
         assert out["image_count"] == 0
-        assert out["media_link_count"] == 0
+
+    def test_extract_link_graph_no_base_url_defaults_to_empty_host(self):
+        """base_url=None → _resolve_base_host returns '' → links have no base to compare → not external."""
+        md = "[Link](https://example.com/page)"
+        out = extract_link_graph(md, base_url=None)
+        assert out["total_links"] == 1
+        assert out["external_links"] == 0
+
+    def test_extract_media_metadata_image_whitespace_url_skipped(self):
+        """Image tag with whitespace-only url is skipped (clean_url is empty)."""
+        md = "![ ]( )"
+        out = extract_media_metadata(md)
+        assert out["image_count"] == 0

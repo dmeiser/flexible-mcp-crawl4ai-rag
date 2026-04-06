@@ -1,5 +1,7 @@
 """Unit tests for extensible URL scorer factory."""
+
 import os
+
 import pytest
 
 os.environ.setdefault("POSTGRES_URL", "postgresql://u:p@localhost:5432/testdb")

@@ -1,7 +1,7 @@
 # crawl4ai-mcp Makefile
 # Usage:
 #   make test            — run unit tests with coverage (offline, no Docker needed)
-#   make lint            — run syntax / type checks
+#   make lint            — autofix with ruff/isort, then run mypy and xenon complexity gate
 #   make build           — build the Docker image
 #   make up              — bring up the full stack (app + pgvector DB)
 #   make down            — tear down the stack
@@ -33,10 +33,22 @@ test-fast:
 # Lint / type checks
 # -------------------------------------------------------------------------
 lint:
-	uv run python -m py_compile src/utils.py src/crawl4ai_mcp.py \
-	    src/crawler/web_crawler.py src/crawler/postgres_client.py \
-	    src/crawler/tool_definitions.py && \
-	echo "Syntax OK"
+	@echo "Running ruff autofix..."
+	-uv run --with ruff ruff check --fix src tests
+	@echo "Running ruff formatter..."
+	uv run --with ruff ruff format src tests
+	@echo "Running isort autofix..."
+	uv run --with isort isort src tests
+	@echo "Running post-isort ruff autofix..."
+	uv run --with ruff ruff check --fix src tests
+	@echo "Re-running ruff check..."
+	uv run --with ruff ruff check src tests
+	@echo "Re-running isort check..."
+	uv run --with isort isort --check-only src tests
+	@echo "Running mypy..."
+	uv run --with mypy mypy src
+	@echo "Running xenon complexity gate (A/A/A)..."
+	uv run --with xenon xenon --max-absolute A --max-modules A --max-average A src
 
 # -------------------------------------------------------------------------
 # Docker build
@@ -94,7 +106,7 @@ help:
 	@echo "Available targets:"
 	@echo "  test              Run unit tests with 100% coverage gate"
 	@echo "  test-fast         Run unit tests without coverage"
-	@echo "  lint              Check Python syntax"
+	@echo "  lint              Autofix with ruff/isort, then run mypy and xenon (A/A/A gate)"
 	@echo "  build             Build Docker image"
 	@echo "  up                Start full stack (app + DB)"
 	@echo "  down              Stop stack"

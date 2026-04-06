@@ -2,15 +2,13 @@
 Utility script to re-embed all stored documents with the current embedding model.
 Run with: uv run python -m src.reembed_documents
 """
+
 import asyncio
 import logging
-from pathlib import Path
-from dotenv import load_dotenv
-
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from sqlmodel import select
-from .utils import CrawledPage, CodeExample, engine, create_embedding, settings, get_session
+
+from .utils import CodeExample, CrawledPage, create_embedding, get_session, settings
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

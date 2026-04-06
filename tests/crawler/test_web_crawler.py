@@ -1,8 +1,9 @@
 """Unit tests for src/crawler/web_crawler.py — 100% coverage, all offline."""
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import os
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 os.environ.setdefault("POSTGRES_URL", "postgresql://u:p@localhost:5432/testdb")
 os.environ.setdefault("EMBEDDING_PROVIDER", "ollama")
@@ -11,23 +12,27 @@ os.environ.setdefault("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 os.environ.setdefault("EMBEDDING_DIM", "4")
 
 from src.crawler.web_crawler import (
+    _collect_urls_to_crawl,
+    _fixed_char_chunking,
+    _paragraph_chunking,
+    _pop_current_frontier,
+    _resolve_chunk_strategy,
+    _result_next_depth_urls,
+    _sentence_chunking,
+    chunk_text_according_to_settings,
+    crawl_batch,
+    crawl_markdown_file,
+    crawl_recursive_internal_links,
     is_sitemap,
     is_txt,
     parse_sitemap,
-    _fixed_char_chunking,
-    _paragraph_chunking,
-    _sentence_chunking,
-    chunk_text_according_to_settings,
-    crawl_markdown_file,
-    crawl_batch,
-    crawl_recursive_internal_links,
 )
 from src.utils import ChunkStrategy
-
 
 # ---------------------------------------------------------------------------
 # Tests: is_sitemap / is_txt
 # ---------------------------------------------------------------------------
+
 
 class TestIsType:
     def test_sitemap_xml_extension(self):
@@ -49,6 +54,7 @@ class TestIsType:
 # ---------------------------------------------------------------------------
 # Tests: parse_sitemap
 # ---------------------------------------------------------------------------
+
 
 class TestParseSitemap:
     @pytest.mark.asyncio
@@ -75,12 +81,13 @@ class TestParseSitemap:
     @pytest.mark.asyncio
     async def test_http_status_error_returns_empty(self):
         import httpx
+
         mock_client = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.get = AsyncMock(side_effect=httpx.HTTPStatusError(
-            "404", request=MagicMock(), response=MagicMock(status_code=404)
-        ))
+        mock_client.get = AsyncMock(
+            side_effect=httpx.HTTPStatusError("404", request=MagicMock(), response=MagicMock(status_code=404))
+        )
 
         with patch("src.crawler.web_crawler.httpx.AsyncClient", return_value=mock_client):
             result = await parse_sitemap("https://example.com/sitemap.xml")
@@ -89,6 +96,7 @@ class TestParseSitemap:
     @pytest.mark.asyncio
     async def test_request_error_returns_empty(self):
         import httpx
+
         mock_client = AsyncMock()
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
@@ -151,6 +159,7 @@ class TestParseSitemap:
 # Tests: _fixed_char_chunking
 # ---------------------------------------------------------------------------
 
+
 class TestFixedCharChunking:
     def test_empty_text(self):
         assert _fixed_char_chunking("", 100, 10) == []
@@ -191,6 +200,7 @@ class TestFixedCharChunking:
 # Tests: _paragraph_chunking
 # ---------------------------------------------------------------------------
 
+
 class TestParagraphChunking:
     def test_empty_text(self):
         assert _paragraph_chunking("", 100, 10) == []
@@ -219,6 +229,7 @@ class TestParagraphChunking:
 # ---------------------------------------------------------------------------
 # Tests: _sentence_chunking
 # ---------------------------------------------------------------------------
+
 
 class TestSentenceChunking:
     def test_empty_text(self):
@@ -270,6 +281,7 @@ class TestSentenceChunking:
 # Tests: chunk_text_according_to_settings
 # ---------------------------------------------------------------------------
 
+
 class TestChunkTextAccordingToSettings:
     @pytest.mark.asyncio
     async def test_empty_returns_empty(self):
@@ -287,8 +299,10 @@ class TestChunkTextAccordingToSettings:
 
     @pytest.mark.asyncio
     async def test_sentence_strategy(self):
-        with patch("src.crawler.web_crawler.settings") as mock_settings, \
-             patch("src.crawler.web_crawler.nltk.sent_tokenize", return_value=["Hello.", "World."]):
+        with (
+            patch("src.crawler.web_crawler.settings") as mock_settings,
+            patch("src.crawler.web_crawler.nltk.sent_tokenize", return_value=["Hello.", "World."]),
+        ):
             mock_settings.CHUNK_SIZE = 500
             mock_settings.CHUNK_OVERLAP = 0
             mock_settings.CHUNK_STRATEGY = ChunkStrategy.SENTENCE
@@ -317,6 +331,7 @@ class TestChunkTextAccordingToSettings:
 # ---------------------------------------------------------------------------
 # Tests: crawl_markdown_file
 # ---------------------------------------------------------------------------
+
 
 class TestCrawlMarkdownFile:
     @pytest.mark.asyncio
@@ -374,6 +389,7 @@ class TestCrawlMarkdownFile:
 # ---------------------------------------------------------------------------
 # Tests: crawl_batch
 # ---------------------------------------------------------------------------
+
 
 class TestCrawlBatch:
     @pytest.mark.asyncio
@@ -442,6 +458,7 @@ class TestCrawlBatch:
 # Tests: crawl_recursive_internal_links
 # ---------------------------------------------------------------------------
 
+
 class TestCrawlRecursiveInternalLinks:
     @pytest.mark.asyncio
     async def test_empty_start_urls_returns_empty(self):
@@ -462,9 +479,7 @@ class TestCrawlRecursiveInternalLinks:
         mock_crawler.arun_many = AsyncMock(return_value=[mock_result])
 
         with patch("src.crawler.web_crawler.MemoryAdaptiveDispatcher"):
-            results = await crawl_recursive_internal_links(
-                mock_crawler, ["https://example.com"], max_depth=0
-            )
+            results = await crawl_recursive_internal_links(mock_crawler, ["https://example.com"], max_depth=0)
         # crawl_batch called once; arun_many called once for batch; at depth 0 no recursion
         assert len(results) == 1
         assert mock_crawler.arun_many.call_count == 1
@@ -489,15 +504,21 @@ class TestCrawlRecursiveInternalLinks:
 
         mock_crawler = AsyncMock()
         # First arun_many: batch crawl; second: link discovery
-        mock_crawler.arun_many = AsyncMock(side_effect=[
-            [batch_result],  # crawl_batch call
-            [link_result],   # link discovery call
-        ])
+        mock_crawler.arun_many = AsyncMock(
+            side_effect=[
+                [batch_result],  # crawl_batch call
+                [link_result],  # link discovery call
+            ]
+        )
 
-        with patch("src.crawler.web_crawler.MemoryAdaptiveDispatcher"), \
-             patch("src.crawler.web_crawler.crawl_batch",
-                   new_callable=AsyncMock,
-                   return_value=[{"url": "https://example.com/docs/", "markdown": "content"}]):
+        with (
+            patch("src.crawler.web_crawler.MemoryAdaptiveDispatcher"),
+            patch(
+                "src.crawler.web_crawler.crawl_batch",
+                new_callable=AsyncMock,
+                return_value=[{"url": "https://example.com/docs/", "markdown": "content"}],
+            ),
+        ):
             results = await crawl_recursive_internal_links(
                 mock_crawler,
                 ["https://example.com/docs/"],
@@ -527,10 +548,12 @@ class TestCrawlRecursiveInternalLinks:
         }
 
         mock_crawler = AsyncMock()
-        mock_crawler.arun_many = AsyncMock(side_effect=[
-            [batch_result],
-            [link_result],
-        ])
+        mock_crawler.arun_many = AsyncMock(
+            side_effect=[
+                [batch_result],
+                [link_result],
+            ]
+        )
 
         with patch("src.crawler.web_crawler.MemoryAdaptiveDispatcher"):
             results = await crawl_recursive_internal_links(
@@ -559,10 +582,12 @@ class TestCrawlRecursiveInternalLinks:
         }
 
         mock_crawler = AsyncMock()
-        mock_crawler.arun_many = AsyncMock(side_effect=[
-            [batch_result],
-            [link_result],
-        ])
+        mock_crawler.arun_many = AsyncMock(
+            side_effect=[
+                [batch_result],
+                [link_result],
+            ]
+        )
 
         with patch("src.crawler.web_crawler.MemoryAdaptiveDispatcher"):
             results = await crawl_recursive_internal_links(
@@ -583,15 +608,15 @@ class TestCrawlRecursiveInternalLinks:
         link_result = MagicMock()
         link_result.success = True
         link_result.url = "https://example.com"
-        link_result.links = {
-            "internal": [{"href": ""}]
-        }
+        link_result.links = {"internal": [{"href": ""}]}
 
         mock_crawler = AsyncMock()
-        mock_crawler.arun_many = AsyncMock(side_effect=[
-            [batch_result],
-            [link_result],
-        ])
+        mock_crawler.arun_many = AsyncMock(
+            side_effect=[
+                [batch_result],
+                [link_result],
+            ]
+        )
 
         with patch("src.crawler.web_crawler.MemoryAdaptiveDispatcher"):
             results = await crawl_recursive_internal_links(
@@ -615,10 +640,12 @@ class TestCrawlRecursiveInternalLinks:
         link_result.links = None
 
         mock_crawler = AsyncMock()
-        mock_crawler.arun_many = AsyncMock(side_effect=[
-            [batch_result],
-            [link_result],
-        ])
+        mock_crawler.arun_many = AsyncMock(
+            side_effect=[
+                [batch_result],
+                [link_result],
+            ]
+        )
 
         with patch("src.crawler.web_crawler.MemoryAdaptiveDispatcher"):
             results = await crawl_recursive_internal_links(
@@ -639,9 +666,7 @@ class TestCrawlRecursiveInternalLinks:
         link_result = MagicMock()
         link_result.success = True
         link_result.url = "https://example.com"
-        link_result.links = {
-            "internal": [{"href": "https://example.com/page#section1"}]
-        }
+        link_result.links = {"internal": [{"href": "https://example.com/page#section1"}]}
 
         # Next batch crawl (including /page)
         page_result = MagicMock()
@@ -650,12 +675,14 @@ class TestCrawlRecursiveInternalLinks:
         page_result.url = "https://example.com/page"
 
         mock_crawler = AsyncMock()
-        mock_crawler.arun_many = AsyncMock(side_effect=[
-            [batch_result],  # first batch
-            [link_result],   # link discovery
-            [page_result],   # second batch (recursive)
-            [],              # empty link discovery at depth 2
-        ])
+        mock_crawler.arun_many = AsyncMock(
+            side_effect=[
+                [batch_result],  # first batch
+                [link_result],  # link discovery
+                [page_result],  # second batch (recursive)
+                [],  # empty link discovery at depth 2
+            ]
+        )
 
         with patch("src.crawler.web_crawler.MemoryAdaptiveDispatcher"):
             results = await crawl_recursive_internal_links(
@@ -681,3 +708,48 @@ class TestCrawlRecursiveInternalLinks:
 
         assert results == []
         mock_crawler.arun_many.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Tests: internal helper functions for coverage
+# ---------------------------------------------------------------------------
+
+
+class TestResolveChunkStrategy:
+    def test_invalid_strategy_returns_settings_default(self):
+        """An unrecognised strategy name falls back to settings.CHUNK_STRATEGY."""
+        result = _resolve_chunk_strategy("totally_invalid_strategy_xyz")
+        assert result is not None
+
+
+class TestPopCurrentFrontier:
+    def test_empty_queue_returns_empty_lists(self):
+        current, remaining = _pop_current_frontier([])
+        assert current == []
+        assert remaining == []
+
+    def test_mixed_depth_queue_splits_correctly(self):
+        """Items at different depths are split: first depth goes to current, rest remain."""
+        queue = [("https://a.com", 0), ("https://b.com", 0), ("https://c.com", 1)]
+        current, remaining = _pop_current_frontier(queue)
+        assert current == [("https://a.com", 0), ("https://b.com", 0)]
+        assert remaining == [("https://c.com", 1)]
+
+
+class TestCollectUrlsToCrawl:
+    def test_already_visited_url_is_skipped(self):
+        """A URL already in visited is not added to urls_to_crawl."""
+        visited: set[str] = {"https://example.com/page"}
+        current_level = [("https://example.com/page", 0), ("https://example.com/new", 0)]
+        result = _collect_urls_to_crawl(current_level, visited, pattern_re=None)
+        assert "https://example.com/page" not in result
+        assert "https://example.com/new" in result
+
+
+class TestResultNextDepthUrls:
+    def test_failed_result_returns_empty(self):
+        """A result with success=False returns no next-depth URLs."""
+        result = MagicMock()
+        result.success = False
+        urls = _result_next_depth_urls(result, set(), next_depth=1)
+        assert urls == []

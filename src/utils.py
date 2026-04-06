@@ -2,28 +2,27 @@
 Utility functions for the Crawl4AI MCP server.
 PostgreSQL/pgvector backend with dual embedding provider (OpenAI or Ollama).
 """
+
 import asyncio
-import logging
-import os
-import json
 import hashlib
+import json
+import logging
 import math
 import re
-from enum import Enum
 from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional, Generator, Tuple
+from enum import Enum
+from typing import Any, Dict, Generator, List, Optional, Sequence, Tuple, cast
 
 import httpx
 import numpy as np
 from openai import AsyncOpenAI
-from pydantic import HttpUrl, PostgresDsn, model_validator
+from pgvector.sqlalchemy import Vector
+from pydantic import PostgresDsn, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-from sqlmodel import Field, SQLModel, create_engine, Session, select, Column
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import JSONB
-from pgvector.sqlalchemy import Vector
 from sqlalchemy.exc import SQLAlchemyError
+from sqlmodel import Column, Field, Session, SQLModel, create_engine, select
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +130,7 @@ class Settings(BaseSettings):
         return self
 
 
-settings = Settings()
+settings = Settings()  # type: ignore[call-arg]
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +200,7 @@ class CodeExample(SQLModel, table=True):
 
 class SourcePolicy(SQLModel, table=True):
     """Per-source freshness and eviction configuration."""
+
     __tablename__ = "source_policies"
     source: str = Field(primary_key=True)
     ttl_days: int = Field(default=90)
@@ -217,6 +217,7 @@ class SourcePolicy(SQLModel, table=True):
 
 class StoragePolicy(SQLModel, table=True):
     """Global storage budget configuration (single-row table)."""
+
     __tablename__ = "storage_policies"
     id: Optional[int] = Field(default=None, primary_key=True)
     is_singleton: bool = Field(default=True)
@@ -232,6 +233,7 @@ class StoragePolicy(SQLModel, table=True):
 
 class EvictionAuditLog(SQLModel, table=True):
     """Audit log of tombstoning and eviction actions."""
+
     __tablename__ = "eviction_audit_log"
     id: Optional[int] = Field(default=None, primary_key=True)
     table_name: str
@@ -259,6 +261,7 @@ def get_session() -> Generator[Session, None, None]:
 # ---------------------------------------------------------------------------
 # Phase 9.5/9.6 — scoring, staleness, tombstoning
 # ---------------------------------------------------------------------------
+
 
 def compute_staleness_score(age_days: float, half_life_days: float = 90.0) -> float:
     """Exponential staleness decay.  Returns 0.0 (fresh) → ~1.0 (stale)."""
@@ -299,37 +302,29 @@ def tombstone_records(
     if not record_ids:
         return 0
 
-    if table_name == "crawled_pages":
-        model_cls = CrawledPage
-    elif table_name == "code_examples":
-        model_cls = CodeExample
-    else:
+    model_cls = _tombstone_model(table_name)
+    if model_cls is None:
         logger.warning(f"Unknown table for tombstoning: {table_name}")
         return 0
 
     now = datetime.now(timezone.utc)
     count = 0
     try:
-        records = session.exec(
-            select(model_cls).where(model_cls.id.in_(record_ids))  # type: ignore[attr-defined]
-        ).all()
+        records = session.exec(select(model_cls).where(cast(Any, model_cls.id).in_(record_ids))).all()
         for record in records:
-            record.tombstoned_at = now
-            record.is_active = False
-            source_str: Optional[str] = None
-            if hasattr(record, "page_metadata") and isinstance(record.page_metadata, dict):
-                source_str = record.page_metadata.get("source")
-            elif hasattr(record, "ex_metadata") and isinstance(record.ex_metadata, dict):
-                source_str = record.ex_metadata.get("source")
+            record_any = cast(Any, record)
+            record_any.tombstoned_at = now
+            record_any.is_active = False
+            source_str = _extract_record_source(record_any)
             log_entry = EvictionAuditLog(
                 table_name=table_name,
-                record_id=record.id,
+                record_id=int(record_any.id),
                 source=source_str,
                 evicted_at=now,
                 reason=reason,
-                value_score=record.value_score,
-                staleness_score=record.staleness_score,
-                was_pinned=record.is_pinned,
+                value_score=record_any.value_score,
+                staleness_score=record_any.staleness_score,
+                was_pinned=record_any.is_pinned,
             )
             session.add(log_entry)
             count += 1
@@ -342,10 +337,26 @@ def tombstone_records(
     return count
 
 
+def _tombstone_model(table_name: str) -> type[CrawledPage] | type[CodeExample] | None:
+    if table_name == "crawled_pages":
+        return CrawledPage
+    if table_name == "code_examples":
+        return CodeExample
+    return None
+
+
+def _extract_record_source(record_any: Any) -> Optional[str]:
+    if hasattr(record_any, "page_metadata") and isinstance(record_any.page_metadata, dict):
+        return record_any.page_metadata.get("source")
+    if hasattr(record_any, "ex_metadata") and isinstance(record_any.ex_metadata, dict):
+        return record_any.ex_metadata.get("source")
+    return None
+
+
 def _get_db_size_bytes(session: Session) -> int:
     """Return current DB size in bytes via pg_database_size."""
     try:
-        row = session.exec(text("SELECT pg_database_size(current_database())")).first()
+        row = session.exec(text("SELECT pg_database_size(current_database())")).first()  # type: ignore[call-overload]
         return int(row[0]) if row else 0
     except Exception:
         return 0
@@ -354,18 +365,26 @@ def _get_db_size_bytes(session: Session) -> int:
 def _parse_iso_datetime(value: Any) -> datetime:
     """Parse timestamp-like metadata values into timezone-aware UTC datetimes."""
     if isinstance(value, datetime):
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
+        return _ensure_utc_datetime(value)
     if isinstance(value, str) and value.strip():
-        try:
-            parsed = datetime.fromisoformat(value.strip())
-            if parsed.tzinfo is None:
-                return parsed.replace(tzinfo=timezone.utc)
-            return parsed.astimezone(timezone.utc)
-        except ValueError:
-            pass
+        parsed = _parse_iso_string(value.strip())
+        if parsed is not None:
+            return parsed
     return datetime.now(timezone.utc)
+
+
+def _ensure_utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _parse_iso_string(value: str) -> Optional[datetime]:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return _ensure_utc_datetime(parsed)
 
 
 # ---------------------------------------------------------------------------
@@ -416,29 +435,33 @@ async def _create_ollama_embedding(text: str, attempt: int = 1) -> List[float]:
     async with httpx.AsyncClient(timeout=60) as client:
         for attempt in range(1, settings.OLLAMA_MAX_RETRIES + 1):
             try:
-                resp = await client.post(
-                    settings.OLLAMA_API_URL,
-                    json={"model": settings.OLLAMA_EMBED_MODEL, "prompt": text},
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                embedding = data.get("embedding")
-                if not embedding or not isinstance(embedding, list):
-                    raise EmbeddingError("Ollama returned invalid embedding format.")
-                return _normalize(embedding)
+                return await _request_ollama_embedding(client, text)
             except (httpx.TimeoutException, httpx.ConnectError) as exc:
-                if attempt < settings.OLLAMA_MAX_RETRIES:
-                    delay = settings.OLLAMA_RETRY_DELAY_SECONDS * (2 ** (attempt - 1))
-                    await asyncio.sleep(delay)
-                    continue
-                raise EmbeddingError(
-                    f"Ollama request failed after {settings.OLLAMA_MAX_RETRIES} attempts: {exc}"
-                ) from exc
+                await _handle_ollama_retry_or_raise(attempt, exc)
             except httpx.HTTPStatusError as exc:
                 raise EmbeddingError(f"Ollama HTTP error {exc.response.status_code}: {exc}") from exc
             except Exception as exc:
                 raise EmbeddingError(f"Unexpected embedding error: {exc}") from exc
     raise EmbeddingError("Ollama embedding failed: exhausted retries")  # pragma: no cover
+
+
+async def _request_ollama_embedding(client: httpx.AsyncClient, text: str) -> List[float]:
+    resp = await client.post(
+        settings.OLLAMA_API_URL,
+        json={"model": settings.OLLAMA_EMBED_MODEL, "prompt": text},
+    )
+    resp.raise_for_status()
+    embedding = resp.json().get("embedding")
+    if not embedding or not isinstance(embedding, list):
+        raise EmbeddingError("Ollama returned invalid embedding format.")
+    return _normalize(embedding)
+
+
+async def _handle_ollama_retry_or_raise(attempt: int, exc: Exception) -> None:
+    if attempt >= settings.OLLAMA_MAX_RETRIES:
+        raise EmbeddingError(f"Ollama request failed after {settings.OLLAMA_MAX_RETRIES} attempts: {exc}") from exc
+    delay = settings.OLLAMA_RETRY_DELAY_SECONDS * (2 ** (attempt - 1))
+    await asyncio.sleep(delay)
 
 
 async def create_embeddings_batch(texts: List[str]) -> List[List[float]]:
@@ -460,35 +483,51 @@ async def generate_contextual_text(full_document: str, chunk: str) -> Tuple[str,
         return chunk, False
 
     try:
-        prompt = (
-            f"<document>\n{full_document[:25000]}\n</document>\n"
-            f"<chunk>\n{chunk}\n</chunk>\n"
-            "Given the document and the specific chunk, write a 1-2 sentence "
-            "summary capturing the chunk's topic and its relationship to the "
-            "wider document. Use keywords that help semantic search.\n"
-            "Summary:"
-        )
-        client = AsyncOpenAI(
-            api_key=settings.LLM_API_KEY,
-            base_url=settings.LLM_BASE_URL,
-        )
-        try:
-            resp = await client.chat.completions.create(
-                model=settings.LLM_MODEL_NAME,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=150,
-            )
-            context_text = resp.choices[0].message.content.strip()
-        finally:
-            await client.close()
-
-        if context_text:
-            combined = f"Context: {context_text}\n\n{chunk}"
-            return combined[: settings.CHUNK_SIZE * 2], True
+        context_text = await _request_contextual_summary(full_document, chunk)
+        enriched = _combine_context_and_chunk(context_text, chunk)
+        if enriched is not None:
+            return enriched, True
         return chunk, False
     except Exception as exc:
         logger.warning(f"Contextual embedding LLM call failed: {exc}")
         return chunk, False
+
+
+def _context_prompt(full_document: str, chunk: str) -> str:
+    return (
+        f"<document>\n{full_document[:25000]}\n</document>\n"
+        f"<chunk>\n{chunk}\n</chunk>\n"
+        "Given the document and the specific chunk, write a 1-2 sentence "
+        "summary capturing the chunk's topic and its relationship to the "
+        "wider document. Use keywords that help semantic search.\n"
+        "Summary:"
+    )
+
+
+async def _request_contextual_summary(full_document: str, chunk: str) -> str:
+    if not settings.LLM_MODEL_NAME:
+        logger.warning("LLM_MODEL_NAME is not configured; skipping contextual enrichment.")
+        return ""
+
+    client = AsyncOpenAI(api_key=settings.LLM_API_KEY, base_url=settings.LLM_BASE_URL)
+    try:
+        resp = await client.chat.completions.create(
+            model=settings.LLM_MODEL_NAME,
+            messages=[{"role": "user", "content": _context_prompt(full_document, chunk)}],
+            max_tokens=150,
+        )
+    finally:
+        await client.close()
+
+    content = resp.choices[0].message.content
+    return content.strip() if isinstance(content, str) else ""
+
+
+def _combine_context_and_chunk(context_text: str, chunk: str) -> Optional[str]:
+    if not context_text:
+        return None
+    combined = f"Context: {context_text}\n\n{chunk}"
+    return combined[: settings.CHUNK_SIZE * 2]
 
 
 # ---------------------------------------------------------------------------
@@ -498,12 +537,201 @@ def upsert_source(session: Session, source: str) -> int:
     """Insert or return id of a source record."""
     existing = session.exec(select(Source).where(Source.source == source)).first()
     if existing:
+        if existing.id is None:
+            raise ValueError("Existing source row missing id")
         return existing.id
     obj = Source(source=source)
     session.add(obj)
     session.commit()
     session.refresh(obj)
+    if obj.id is None:
+        raise ValueError("Source insert did not return id")
     return obj.id
+
+
+def _prepare_page_metadata(
+    meta: Dict[str, Any],
+    content: str,
+) -> tuple[Dict[str, Any], Dict[str, Any], datetime, str, Optional[str]]:
+    """Normalize page metadata and derive retrieval metadata + persisted fields."""
+    meta_with_size = {"chunk_size": len(content), **meta}
+    crawl_timestamp = _parse_iso_datetime(meta_with_size.get("crawl_timestamp") or meta_with_size.get("crawl_time"))
+
+    content_hash = _resolve_content_hash(meta_with_size, content)
+    source_change_id = _normalize_source_change_id(meta_with_size.get("source_change_id"))
+    references_markdown = _normalize_references_markdown(meta_with_size.get("references_markdown"))
+    link_references = _resolve_link_references(meta_with_size.get("link_references"), references_markdown)
+
+    has_citations = bool(meta_with_size.get("has_citations", False))
+    meta_with_size["references_markdown"] = references_markdown
+    meta_with_size["link_references"] = link_references
+    meta_with_size["has_citations"] = has_citations
+
+    retrieval_metadata = {
+        "source": meta_with_size.get("source"),
+        "url": meta_with_size.get("url"),
+        "crawl_type": meta_with_size.get("crawl_type"),
+        "run_id": meta_with_size.get("run_id"),
+        "markdown_variant": meta_with_size.get("markdown_variant"),
+        "extraction_strategy": meta_with_size.get("extraction_strategy"),
+        "session_id": meta_with_size.get("session_id"),
+        "source_type": meta_with_size.get("source_type"),
+        "crawl_timestamp": meta_with_size.get("crawl_timestamp") or meta_with_size.get("crawl_time"),
+        "references_markdown": references_markdown,
+        "link_references": link_references,
+        "has_link_references": bool(references_markdown or link_references),
+        "has_citations": has_citations,
+    }
+
+    return meta_with_size, retrieval_metadata, crawl_timestamp, content_hash, source_change_id
+
+
+def _resolve_content_hash(meta: Dict[str, Any], content: str) -> str:
+    content_hash = meta.get("content_hash")
+    if isinstance(content_hash, str) and content_hash:
+        return content_hash
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _normalize_source_change_id(value: Any) -> Optional[str]:
+    if isinstance(value, str) and value.strip():
+        return value
+    return None
+
+
+def _normalize_references_markdown(value: Any) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def _resolve_link_references(value: Any, references_markdown: str) -> List[Dict[str, str]]:
+    if isinstance(value, list):
+        return value
+    return extract_link_references(references_markdown)
+
+
+def _build_crawled_page_row(
+    session: Session,
+    *,
+    url: str,
+    chunk_number: int,
+    content: str,
+    metadata: Dict[str, Any],
+    embedding: List[float],
+    first_seen_map: Dict[Tuple[str, int], datetime],
+    now: datetime,
+) -> CrawledPage:
+    """Build one CrawledPage ORM row from normalized inputs."""
+    source_str = metadata.get("source", "")
+    source_id = upsert_source(session, source_str) if source_str else None
+    meta_with_size, retrieval_metadata, crawl_timestamp, content_hash, source_change_id = _prepare_page_metadata(
+        metadata,
+        content,
+    )
+
+    return CrawledPage(
+        source_id=source_id,
+        url=url,
+        chunk_number=chunk_number,
+        content=content,
+        content_class=str(meta_with_size.get("content_class") or ContentClass.TEXT.value),
+        is_active=bool(meta_with_size.get("is_active", True)),
+        crawl_timestamp=crawl_timestamp,
+        content_hash=content_hash,
+        source_change_id=source_change_id,
+        page_metadata=meta_with_size,
+        retrieval_metadata=retrieval_metadata,
+        embedding=embedding,
+        first_seen_at=first_seen_map.get((url, chunk_number), now),
+        last_seen_at=now,
+        last_crawled_at=crawl_timestamp,
+    )
+
+
+def _build_code_example_row(
+    session: Session,
+    *,
+    url: str,
+    chunk_number: int,
+    content: str,
+    language: Optional[str],
+    summary: Optional[str],
+    metadata: Dict[str, Any],
+    embedding: List[float],
+    first_seen_map: Dict[Tuple[str, int], datetime],
+    now: datetime,
+) -> CodeExample:
+    """Build one CodeExample ORM row from normalized inputs."""
+    source_str = metadata.get("source", "")
+    source_id = upsert_source(session, source_str) if source_str else None
+
+    content_hash = _resolve_content_hash(metadata, content)
+    source_change_id = _normalize_source_change_id(metadata.get("source_change_id"))
+
+    crawl_ts = _parse_iso_datetime(metadata.get("crawl_timestamp") or metadata.get("crawl_time"))
+    return CodeExample(
+        source_id=source_id,
+        url=url,
+        chunk_number=chunk_number,
+        language=language,
+        content=content,
+        summary=summary,
+        content_class=str(metadata.get("content_class") or ContentClass.CODE.value),
+        is_active=bool(metadata.get("is_active", True)),
+        crawl_timestamp=crawl_ts,
+        content_hash=content_hash,
+        source_change_id=source_change_id,
+        ex_metadata=metadata,
+        embedding=embedding,
+        first_seen_at=first_seen_map.get((url, chunk_number), now),
+        last_seen_at=now,
+        last_crawled_at=crawl_ts,
+    )
+
+
+def _validate_document_batch_lengths(
+    urls: List[str],
+    contents: List[str],
+    metadatas: List[Dict[str, Any]],
+    chunk_numbers: List[int],
+) -> bool:
+    """Return True when document batch inputs are length-aligned."""
+    return len(urls) == len(contents) == len(metadatas) == len(chunk_numbers)
+
+
+def _collect_valid_document_entries(
+    urls: List[str],
+    contents: List[str],
+    metadatas: List[Dict[str, Any]],
+    chunk_numbers: List[int],
+    full_documents: Optional[List[str]],
+) -> List[tuple[str, str, Dict[str, Any], int, Optional[str]]]:
+    """Filter out empty-content entries while preserving index alignment."""
+    return [
+        (url, content, metadata, chunk_number, (full_documents[index] if full_documents else None))
+        for index, (url, content, metadata, chunk_number) in enumerate(zip(urls, contents, metadatas, chunk_numbers))
+        if content and content.strip()
+    ]
+
+
+def _delete_existing_crawled_pages(
+    session: Session,
+    urls: List[str],
+) -> Dict[Tuple[str, int], datetime]:
+    """Delete existing pages for URLs and return preserved first_seen map."""
+    first_seen_map: Dict[Tuple[str, int], datetime] = {}
+    unique_urls = list(set(urls))
+    try:
+        to_delete = session.exec(select(CrawledPage).where(cast(Any, CrawledPage.url).in_(unique_urls))).all()
+        for row in to_delete:
+            first_seen_map[(row.url, row.chunk_number)] = row.first_seen_at
+            session.delete(row)
+        if to_delete:
+            session.commit()
+    except SQLAlchemyError as exc:
+        logger.warning(f"Delete before insert failed: {exc}")
+        session.rollback()
+        return {}
+    return first_seen_map
 
 
 # ---------------------------------------------------------------------------
@@ -522,134 +750,150 @@ async def add_documents_to_db(
     Deletes existing rows for those URLs first (upsert semantics).
     Returns total rows inserted.
     """
+    valid = _prepare_valid_document_entries(urls, contents, metadatas, chunk_numbers, full_documents)
+    if valid is None:
+        return 0
+
+    v_urls, v_contents, v_metas, v_chunks, v_fulldocs = valid
+
+    first_seen_map = _delete_existing_crawled_pages(session, list(v_urls))
+
+    embed_texts = await _embedding_texts_for_documents(v_contents, v_fulldocs, full_documents)
+    return await _insert_document_batches(
+        session=session,
+        embed_texts=embed_texts,
+        urls=v_urls,
+        metadatas=v_metas,
+        chunk_numbers=v_chunks,
+        first_seen_map=first_seen_map,
+    )
+
+
+def _prepare_valid_document_entries(
+    urls: List[str],
+    contents: List[str],
+    metadatas: List[Dict[str, Any]],
+    chunk_numbers: List[int],
+    full_documents: Optional[List[str]],
+) -> Optional[tuple[Any, Any, Any, Any, Any]]:
     if not urls:
-        return 0
-
-    # Validate lengths
-    if not (len(urls) == len(contents) == len(metadatas) == len(chunk_numbers)):
+        return None
+    if not _validate_document_batch_lengths(urls, contents, metadatas, chunk_numbers):
         logger.error("Input list lengths mismatch in add_documents_to_db.")
-        return 0
-
-    # Collect valid items (non-empty content)
-    valid = [
-        (u, c, m, n, (full_documents[i] if full_documents else None))
-        for i, (u, c, m, n) in enumerate(zip(urls, contents, metadatas, chunk_numbers))
-        if c and c.strip()
-    ]
+        return None
+    valid = _collect_valid_document_entries(urls, contents, metadatas, chunk_numbers, full_documents)
     if not valid:
-        return 0
-
+        return None
     v_urls, v_contents, v_metas, v_chunks, v_fulldocs = zip(*valid)
+    return v_urls, v_contents, v_metas, v_chunks, v_fulldocs
 
-    # Collect first_seen_at from existing rows before deletion (preserves re-index timestamps)
-    first_seen_map: Dict[Tuple[str, int], datetime] = {}
-    unique_urls = list(set(v_urls))
-    try:
-        to_delete = session.exec(select(CrawledPage).where(CrawledPage.url.in_(unique_urls))).all()
-        for row in to_delete:
-            first_seen_map[(row.url, row.chunk_number)] = row.first_seen_at
-            session.delete(row)
-        if to_delete:
-            session.commit()
-    except SQLAlchemyError as exc:
-        logger.warning(f"Delete before insert failed: {exc}")
-        first_seen_map.clear()
-        session.rollback()
 
-    # Apply contextual enrichment if enabled
-    if settings.USE_CONTEXTUAL_EMBEDDINGS and settings.LLM_ENABLED and full_documents:
-        enriched = await asyncio.gather(
-            *[generate_contextual_text(fd or "", c) for c, fd in zip(v_contents, v_fulldocs)]
-        )
-        embed_texts = [e[0] for e in enriched]
-    else:
-        embed_texts = list(v_contents)
+async def _embedding_texts_for_documents(
+    contents: Sequence[str],
+    full_docs: Sequence[Optional[str]],
+    full_documents: Optional[List[str]],
+) -> List[str]:
+    if not _should_enrich_with_context(full_documents):
+        return list(contents)
+    enriched = await asyncio.gather(*[generate_contextual_text(fd or "", c) for c, fd in zip(contents, full_docs)])
+    return [entry[0] for entry in enriched]
 
-    # Embed in batches
-    _now = datetime.now(timezone.utc)
+
+def _should_enrich_with_context(full_documents: Optional[List[str]]) -> bool:
+    return bool(settings.USE_CONTEXTUAL_EMBEDDINGS and settings.LLM_ENABLED and full_documents)
+
+
+async def _insert_document_batches(
+    session: Session,
+    embed_texts: List[str],
+    urls: Sequence[str],
+    metadatas: Sequence[Dict[str, Any]],
+    chunk_numbers: Sequence[int],
+    first_seen_map: Dict[Tuple[str, int], datetime],
+) -> int:
+    now_utc = datetime.now(timezone.utc)
     total_added = 0
     batch_size = settings.BATCH_SIZE
     for batch_start in range(0, len(embed_texts), batch_size):
-        batch_end = batch_start + batch_size
-        b_texts = embed_texts[batch_start:batch_end]
-        b_urls = v_urls[batch_start:batch_end]
-        b_metas = v_metas[batch_start:batch_end]
-        b_chunks = v_chunks[batch_start:batch_end]
-
-        try:
-            embeddings = await create_embeddings_batch(b_texts)
-        except EmbeddingError as exc:
-            logger.error(f"Skipping batch due to embedding error: {exc}")
-            continue
-
-        rows = []
-        for i, emb in enumerate(embeddings):
-            source_str = b_metas[i].get("source", "")
-            source_id = upsert_source(session, source_str) if source_str else None
-            meta_with_size = {"chunk_size": len(b_texts[i]), **b_metas[i]}
-            content_class = str(meta_with_size.get("content_class") or ContentClass.TEXT.value)
-            is_active = bool(meta_with_size.get("is_active", True))
-            crawl_timestamp = _parse_iso_datetime(
-                meta_with_size.get("crawl_timestamp") or meta_with_size.get("crawl_time")
-            )
-            content_hash = meta_with_size.get("content_hash")
-            if not isinstance(content_hash, str) or not content_hash:
-                content_hash = hashlib.sha256(b_texts[i].encode("utf-8")).hexdigest()
-            source_change_id = meta_with_size.get("source_change_id")
-            if not isinstance(source_change_id, str) or not source_change_id.strip():
-                source_change_id = None
-            references_markdown = meta_with_size.get("references_markdown")
-            if not isinstance(references_markdown, str):
-                references_markdown = ""
-            link_references = meta_with_size.get("link_references")
-            if not isinstance(link_references, list):
-                link_references = extract_link_references(references_markdown)
-            meta_with_size["references_markdown"] = references_markdown
-            meta_with_size["link_references"] = link_references
-            meta_with_size["has_citations"] = bool(meta_with_size.get("has_citations", False))
-            retrieval_metadata = {
-                "source": meta_with_size.get("source"),
-                "url": meta_with_size.get("url"),
-                "crawl_type": meta_with_size.get("crawl_type"),
-                "run_id": meta_with_size.get("run_id"),
-                "markdown_variant": meta_with_size.get("markdown_variant"),
-                "extraction_strategy": meta_with_size.get("extraction_strategy"),
-                "session_id": meta_with_size.get("session_id"),
-                "source_type": meta_with_size.get("source_type"),
-                "crawl_timestamp": meta_with_size.get("crawl_timestamp") or meta_with_size.get("crawl_time"),
-                "references_markdown": references_markdown,
-                "link_references": link_references,
-                "has_link_references": bool(references_markdown or link_references),
-                "has_citations": meta_with_size["has_citations"],
-            }
-            rows.append(
-                CrawledPage(
-                    source_id=source_id,
-                    url=b_urls[i],
-                    chunk_number=b_chunks[i],
-                    content=b_texts[i],
-                    content_class=content_class,
-                    is_active=is_active,
-                    crawl_timestamp=crawl_timestamp,
-                    content_hash=content_hash,
-                    source_change_id=source_change_id,
-                    page_metadata=meta_with_size,
-                    retrieval_metadata=retrieval_metadata,
-                    embedding=emb,
-                    first_seen_at=first_seen_map.get((b_urls[i], b_chunks[i]), _now),
-                    last_seen_at=_now,
-                    last_crawled_at=crawl_timestamp,
-                )
-            )
-        try:
-            session.add_all(rows)
-            session.commit()
-            total_added += len(rows)
-        except SQLAlchemyError as exc:
-            logger.error(f"DB insert failed for batch: {exc}")
-            session.rollback()
-
+        total_added += await _insert_single_document_batch(
+            session,
+            embed_texts,
+            urls,
+            metadatas,
+            chunk_numbers,
+            first_seen_map,
+            now_utc,
+            batch_start,
+            batch_size,
+        )
     return total_added
+
+
+async def _insert_single_document_batch(
+    session: Session,
+    embed_texts: Sequence[str],
+    urls: Sequence[str],
+    metadatas: Sequence[Dict[str, Any]],
+    chunk_numbers: Sequence[int],
+    first_seen_map: Dict[Tuple[str, int], datetime],
+    now_utc: datetime,
+    batch_start: int,
+    batch_size: int,
+) -> int:
+    batch_end = batch_start + batch_size
+    b_texts = list(embed_texts[batch_start:batch_end])
+    b_urls = list(urls[batch_start:batch_end])
+    b_metas = list(metadatas[batch_start:batch_end])
+    b_chunks = list(chunk_numbers[batch_start:batch_end])
+    embeddings = await _safe_batch_embeddings(b_texts)
+    if embeddings is None:
+        return 0
+    rows = _build_crawled_rows_batch(session, b_urls, b_chunks, b_texts, b_metas, embeddings, first_seen_map, now_utc)
+    return _commit_rows(session, rows)
+
+
+async def _safe_batch_embeddings(texts: List[str]) -> Optional[List[List[float]]]:
+    try:
+        return await create_embeddings_batch(texts)
+    except EmbeddingError as exc:
+        logger.error(f"Skipping batch due to embedding error: {exc}")
+        return None
+
+
+def _build_crawled_rows_batch(
+    session: Session,
+    urls: List[str],
+    chunk_numbers: List[int],
+    texts: List[str],
+    metadatas: List[Dict[str, Any]],
+    embeddings: List[List[float]],
+    first_seen_map: Dict[Tuple[str, int], datetime],
+    now_utc: datetime,
+) -> List[CrawledPage]:
+    return [
+        _build_crawled_page_row(
+            session,
+            url=urls[i],
+            chunk_number=chunk_numbers[i],
+            content=texts[i],
+            metadata=metadatas[i],
+            embedding=embedding,
+            first_seen_map=first_seen_map,
+            now=now_utc,
+        )
+        for i, embedding in enumerate(embeddings)
+    ]
+
+
+def _commit_rows(session: Session, rows: List[CrawledPage]) -> int:
+    try:
+        session.add_all(rows)
+        session.commit()
+        return len(rows)
+    except SQLAlchemyError as exc:
+        logger.error(f"DB insert failed for batch: {exc}")
+        session.rollback()
+        return 0
 
 
 async def add_code_examples_to_db(
@@ -665,20 +909,7 @@ async def add_code_examples_to_db(
     if not urls:
         return 0
 
-    # Delete existing
-    first_seen_code_map: Dict[Tuple[str, int], datetime] = {}
-    unique_urls = list(set(urls))
-    try:
-        to_delete = session.exec(select(CodeExample).where(CodeExample.url.in_(unique_urls))).all()
-        for row in to_delete:
-            first_seen_code_map[(row.url, row.chunk_number)] = row.first_seen_at
-            session.delete(row)
-        if to_delete:
-            session.commit()
-    except SQLAlchemyError as exc:
-        logger.warning(f"Delete before code insert failed: {exc}")
-        first_seen_code_map.clear()
-        session.rollback()
+    first_seen_code_map = _delete_existing_code_examples(session, urls)
 
     _now_code = datetime.now(timezone.utc)
 
@@ -688,38 +919,18 @@ async def add_code_examples_to_db(
         logger.error(f"Code example embedding failed: {exc}")
         return 0
 
-    rows = []
-    for i, emb in enumerate(embeddings):
-        source_str = metadatas[i].get("source", "")
-        source_id = upsert_source(session, source_str) if source_str else None
-        meta = metadatas[i] if isinstance(metadatas[i], dict) else {}
-        content_hash = meta.get("content_hash")
-        if not isinstance(content_hash, str) or not content_hash:
-            content_hash = hashlib.sha256(contents[i].encode("utf-8")).hexdigest()
-        source_change_id = meta.get("source_change_id")
-        if not isinstance(source_change_id, str) or not source_change_id.strip():
-            source_change_id = None
-        crawl_ts = _parse_iso_datetime(meta.get("crawl_timestamp") or meta.get("crawl_time"))
-        rows.append(
-            CodeExample(
-                source_id=source_id,
-                url=urls[i],
-                chunk_number=chunk_numbers[i],
-                language=languages[i],
-                content=contents[i],
-                summary=summaries[i],
-                content_class=str(meta.get("content_class") or ContentClass.CODE.value),
-                is_active=bool(meta.get("is_active", True)),
-                crawl_timestamp=crawl_ts,
-                content_hash=content_hash,
-                source_change_id=source_change_id,
-                ex_metadata=meta,
-                embedding=emb,
-                first_seen_at=first_seen_code_map.get((urls[i], chunk_numbers[i]), _now_code),
-                last_seen_at=_now_code,
-                last_crawled_at=crawl_ts,
-            )
-        )
+    rows = _build_code_example_rows(
+        session,
+        urls,
+        contents,
+        languages,
+        summaries,
+        metadatas,
+        chunk_numbers,
+        embeddings,
+        first_seen_code_map,
+        _now_code,
+    )
     try:
         session.add_all(rows)
         session.commit()
@@ -728,6 +939,52 @@ async def add_code_examples_to_db(
         logger.error(f"Code example DB insert failed: {exc}")
         session.rollback()
         return 0
+
+
+def _delete_existing_code_examples(session: Session, urls: List[str]) -> Dict[Tuple[str, int], datetime]:
+    first_seen_code_map: Dict[Tuple[str, int], datetime] = {}
+    unique_urls = list(set(urls))
+    try:
+        to_delete = session.exec(select(CodeExample).where(cast(Any, CodeExample.url).in_(unique_urls))).all()
+        for row in to_delete:
+            first_seen_code_map[(row.url, row.chunk_number)] = row.first_seen_at
+            session.delete(row)
+        if to_delete:
+            session.commit()
+        return first_seen_code_map
+    except SQLAlchemyError as exc:
+        logger.warning(f"Delete before code insert failed: {exc}")
+        session.rollback()
+        return {}
+
+
+def _build_code_example_rows(
+    session: Session,
+    urls: List[str],
+    contents: List[str],
+    languages: List[Optional[str]],
+    summaries: List[Optional[str]],
+    metadatas: List[Dict[str, Any]],
+    chunk_numbers: List[int],
+    embeddings: List[List[float]],
+    first_seen_code_map: Dict[Tuple[str, int], datetime],
+    now_code: datetime,
+) -> List[CodeExample]:
+    return [
+        _build_code_example_row(
+            session,
+            url=urls[i],
+            chunk_number=chunk_numbers[i],
+            content=contents[i],
+            language=languages[i],
+            summary=summaries[i],
+            metadata=metadatas[i] if isinstance(metadatas[i], dict) else {},
+            embedding=emb,
+            first_seen_map=first_seen_code_map,
+            now=now_code,
+        )
+        for i, emb in enumerate(embeddings)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -747,20 +1004,80 @@ async def search_documents(
         logger.warning("Empty search query.")
         return []
 
-    hybrid = settings.USE_HYBRID_SEARCH if use_hybrid is None else use_hybrid
-
-    try:
-        query_embedding = await create_embedding(query)
-    except EmbeddingError as exc:
-        logger.error(f"Failed to embed query: {exc}")
+    hybrid = _resolve_hybrid_mode(use_hybrid)
+    query_embedding = await _safe_query_embedding(query)
+    if query_embedding is None:
         return []
 
-    # Build filter JSON for the DB function
     filter_json = json.dumps(filter_metadata or {})
+    return _search_documents_with_embedding(
+        session=session,
+        query=query,
+        query_embedding=query_embedding,
+        match_count=match_count,
+        filter_metadata=filter_metadata,
+        filter_json=filter_json,
+        hybrid=hybrid,
+    )
 
-    # Use the SQL function for vector search
+
+def _search_documents_with_embedding(
+    session: Session,
+    query: str,
+    query_embedding: List[float],
+    match_count: int,
+    filter_metadata: Optional[Dict[str, Any]],
+    filter_json: str,
+    hybrid: bool,
+) -> List[Dict[str, Any]]:
+    vector_results = _vector_search_rows_to_results(
+        _run_vector_search(
+            session=session,
+            query_embedding=query_embedding,
+            filter_json=filter_json,
+            match_count=match_count,
+            hybrid=hybrid,
+            filter_metadata=filter_metadata,
+        )
+    )
+
+    if not hybrid:
+        return vector_results[:match_count]
+
+    fts_raw = _run_fts_search(
+        session=session,
+        query=query,
+        filter_json=filter_json,
+        match_count=match_count,
+    )
+    return _merge_hybrid_results(vector_results=vector_results, fts_raw=fts_raw, match_count=match_count)
+
+
+def _resolve_hybrid_mode(use_hybrid: Optional[bool]) -> bool:
+    if use_hybrid is None:
+        return settings.USE_HYBRID_SEARCH
+    return use_hybrid
+
+
+async def _safe_query_embedding(query: str) -> Optional[List[float]]:
     try:
-        raw = session.exec(
+        return await create_embedding(query)
+    except EmbeddingError as exc:
+        logger.error(f"Failed to embed query: {exc}")
+        return None
+
+
+def _run_vector_search(
+    session: Session,
+    query_embedding: List[float],
+    filter_json: str,
+    match_count: int,
+    hybrid: bool,
+    filter_metadata: Optional[Dict[str, Any]],
+) -> Sequence[Any]:
+    """Run DB vector search with fallback to Python-side similarity."""
+    try:
+        return session.exec(  # type: ignore[call-overload]
             text(
                 "SELECT id, url, chunk_number, content, metadata, similarity "
                 "FROM match_crawled_pages(CAST(:emb AS vector), :cnt, CAST(:filt AS jsonb))"
@@ -771,28 +1088,34 @@ async def search_documents(
             )
         ).all()
     except Exception:
-        # Fall back to Python-side similarity if DB function not available
-        raw = _python_side_vector_search(session, query_embedding, match_count * 2, filter_metadata)
+        return _python_side_vector_search(session, query_embedding, match_count * 2, filter_metadata)
 
-    vector_results = [
+
+def _vector_search_rows_to_results(raw_rows: Sequence[Any]) -> List[Dict[str, Any]]:
+    """Normalize vector-search rows to API result dicts."""
+    return [
         {
-            "id": r[0],
-            "url": r[1],
-            "chunk_number": r[2],
-            "content": r[3],
-            "page_metadata": r[4] if isinstance(r[4], dict) else {},
-            "similarity_score": float(r[5]),
+            "id": row[0],
+            "url": row[1],
+            "chunk_number": row[2],
+            "content": row[3],
+            "page_metadata": row[4] if isinstance(row[4], dict) else {},
+            "similarity_score": float(row[5]),
             "fts_score": 0.0,
         }
-        for r in raw
+        for row in raw_rows
     ]
 
-    if not hybrid:
-        return vector_results[:match_count]
 
-    # FTS pass
+def _run_fts_search(
+    session: Session,
+    query: str,
+    filter_json: str,
+    match_count: int,
+) -> Sequence[Any]:
+    """Run FTS query used for hybrid RRF search; return empty on failure."""
     try:
-        fts_raw = session.exec(
+        return session.exec(  # type: ignore[call-overload]
             text(
                 "SELECT id, url, chunk_number, content, metadata, "
                 "ts_rank(fts, plainto_tsquery('english', :q)) AS rank "
@@ -805,41 +1128,66 @@ async def search_documents(
             ).bindparams(q=query, filt=filter_json, cnt=match_count * 2)
         ).all()
     except Exception:
-        fts_raw = []
+        return []
 
-    fts_map = {
-        r[0]: float(r[5]) for r in fts_raw
-    }
 
-    # Reciprocal rank fusion
-    vector_rank = {r["id"]: i + 1 for i, r in enumerate(vector_results)}
-    fts_ids_ordered = [r[0] for r in fts_raw]
-    fts_rank = {rid: i + 1 for i, rid in enumerate(fts_ids_ordered)}
+def _merge_hybrid_results(
+    vector_results: List[Dict[str, Any]],
+    fts_raw: Sequence[Any],
+    match_count: int,
+) -> List[Dict[str, Any]]:
+    """Merge vector and FTS rows using reciprocal rank fusion."""
+    fts_map = _fts_score_map(fts_raw)
+    vector_rank = _rank_map_from_vector_results(vector_results)
+    fts_rank = _rank_map_from_fts_rows(fts_raw)
+    rrf_scores = _rrf_scores(vector_rank, fts_rank)
+    id_to_result = _merge_vector_and_fts_rows(vector_results, fts_raw, fts_map)
+    merged = sorted(id_to_result.values(), key=lambda result: rrf_scores.get(result["id"], 0), reverse=True)
+    return merged[:match_count]
 
+
+def _fts_score_map(fts_raw: Sequence[Any]) -> Dict[int, float]:
+    return {int(row[0]): float(row[5]) for row in fts_raw}
+
+
+def _rank_map_from_vector_results(vector_results: List[Dict[str, Any]]) -> Dict[int, int]:
+    return {int(result["id"]): index + 1 for index, result in enumerate(vector_results)}
+
+
+def _rank_map_from_fts_rows(fts_raw: Sequence[Any]) -> Dict[int, int]:
+    return {int(row[0]): index + 1 for index, row in enumerate(fts_raw)}
+
+
+def _rrf_scores(vector_rank: Dict[int, int], fts_rank: Dict[int, int]) -> Dict[int, float]:
     k = 60
     all_ids = set(vector_rank) | set(fts_rank)
-    rrf_scores = {
-        rid: 1 / (k + vector_rank.get(rid, len(all_ids) + k))
-             + 1 / (k + fts_rank.get(rid, len(all_ids) + k))
-        for rid in all_ids
+    return {
+        record_id: 1 / (k + vector_rank.get(record_id, len(all_ids) + k))
+        + 1 / (k + fts_rank.get(record_id, len(all_ids) + k))
+        for record_id in all_ids
     }
 
-    # Merge results
-    id_to_result: Dict[int, Dict[str, Any]] = {r["id"]: r for r in vector_results}
-    for r in fts_raw:
-        if r[0] not in id_to_result:
-            id_to_result[r[0]] = {
-                "id": r[0],
-                "url": r[1],
-                "chunk_number": r[2],
-                "content": r[3],
-                "page_metadata": r[4] if isinstance(r[4], dict) else {},
-                "similarity_score": 0.0,
-                "fts_score": fts_map.get(r[0], 0.0),
-            }
 
-    merged = sorted(id_to_result.values(), key=lambda x: rrf_scores.get(x["id"], 0), reverse=True)
-    return merged[:match_count]
+def _merge_vector_and_fts_rows(
+    vector_results: List[Dict[str, Any]],
+    fts_raw: Sequence[Any],
+    fts_map: Dict[int, float],
+) -> Dict[int, Dict[str, Any]]:
+    id_to_result: Dict[int, Dict[str, Any]] = {int(result["id"]): result for result in vector_results}
+    for row in fts_raw:
+        row_id = int(row[0])
+        if row_id in id_to_result:
+            continue
+        id_to_result[row_id] = {
+            "id": row_id,
+            "url": row[1],
+            "chunk_number": row[2],
+            "content": row[3],
+            "page_metadata": row[4] if isinstance(row[4], dict) else {},
+            "similarity_score": 0.0,
+            "fts_score": fts_map.get(row_id, 0.0),
+        }
+    return id_to_result
 
 
 def _python_side_vector_search(
@@ -850,35 +1198,50 @@ def _python_side_vector_search(
 ) -> List[Any]:
     """Fallback: compute cosine similarity in Python."""
     q = np.array(query_embedding, dtype=np.float32)
-    pages = session.exec(select(CrawledPage)).all()
+    pages = _active_pages(session.exec(select(CrawledPage)).all())
+    pages = _metadata_filtered_pages(pages, filter_metadata)
 
-    # Filter inactive and tombstoned pages (mirrors SQL match function behaviour)
-    pages = [p for p in pages if p.is_active and p.tombstoned_at is None]
-
-    if filter_metadata:
-        pages = [
-            p for p in pages
-            if all(
-                (p.page_metadata if isinstance(p.page_metadata, dict) else {}).get(k) == v
-                for k, v in filter_metadata.items()
-            )
-        ]
-
-    scored = []
+    scored: List[Any] = []
     for p in pages:
-        if not p.embedding:
-            continue
-        arr = np.array(p.embedding, dtype=np.float32)
-        norm_q = np.linalg.norm(q)
-        norm_a = np.linalg.norm(arr)
-        if norm_q == 0 or norm_a == 0:
-            sim = 0.0
-        else:
-            sim = float(np.dot(q, arr) / (norm_q * norm_a))
-        scored.append((p.id, p.url, p.chunk_number, p.content, p.page_metadata, sim))
+        scored_row = _page_similarity_row(p, q)
+        if scored_row is not None:
+            scored.append(scored_row)
 
     scored.sort(key=lambda x: x[5], reverse=True)
     return scored[:limit]
+
+
+def _active_pages(pages: Sequence[CrawledPage]) -> List[CrawledPage]:
+    return [page for page in pages if page.is_active and page.tombstoned_at is None]
+
+
+def _metadata_filtered_pages(
+    pages: List[CrawledPage],
+    filter_metadata: Optional[Dict[str, Any]],
+) -> List[CrawledPage]:
+    if not filter_metadata:
+        return pages
+    return [page for page in pages if _page_matches_metadata(page, filter_metadata)]
+
+
+def _page_matches_metadata(page: CrawledPage, filter_metadata: Dict[str, Any]) -> bool:
+    metadata = page.page_metadata if isinstance(page.page_metadata, dict) else {}
+    return all(metadata.get(key) == value for key, value in filter_metadata.items())
+
+
+def _page_similarity_row(page: CrawledPage, query_vec: np.ndarray[Any, Any]) -> Optional[tuple[Any, ...]]:
+    if not page.embedding:
+        return None
+    similarity = _cosine_similarity(query_vec, np.array(page.embedding, dtype=np.float32))
+    return (page.id, page.url, page.chunk_number, page.content, page.page_metadata, similarity)
+
+
+def _cosine_similarity(vec_a: np.ndarray[Any, Any], vec_b: np.ndarray[Any, Any]) -> float:
+    norm_a = np.linalg.norm(vec_a)
+    norm_b = np.linalg.norm(vec_b)
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return float(np.dot(vec_a, vec_b) / (norm_a * norm_b))
 
 
 async def search_code_examples(
@@ -897,34 +1260,45 @@ async def search_code_examples(
         logger.error(f"Failed to embed code query: {exc}")
         return []
 
-    filter_dict: Dict[str, Any] = {}
-    if language:
-        filter_dict["language"] = language
-    filter_json = json.dumps(filter_dict)
+    filter_json = _code_examples_filter_json(language)
+    raw = _query_code_example_rows(session, query_embedding, match_count, filter_json)
+    return [_code_example_row_to_result(row) for row in raw]
 
+
+def _code_examples_filter_json(language: Optional[str]) -> str:
+    if not language:
+        return json.dumps({})
+    return json.dumps({"language": language})
+
+
+def _query_code_example_rows(
+    session: Session,
+    query_embedding: List[float],
+    match_count: int,
+    filter_json: str,
+) -> Sequence[Any]:
     try:
-        raw = session.exec(
+        return session.execute(
             text(
                 "SELECT id, url, chunk_number, language, content, summary, metadata, similarity "
                 "FROM match_code_examples(CAST(:emb AS vector), :cnt, CAST(:filt AS jsonb))"
             ).bindparams(emb=str(query_embedding), cnt=match_count, filt=filter_json)
         ).all()
     except Exception:
-        raw = []
+        return []
 
-    return [
-        {
-            "id": r[0],
-            "url": r[1],
-            "chunk_number": r[2],
-            "language": r[3],
-            "content": r[4],
-            "summary": r[5],
-            "metadata": r[6] if isinstance(r[6], dict) else {},
-            "similarity_score": float(r[7]),
-        }
-        for r in raw
-    ]
+
+def _code_example_row_to_result(row: Any) -> Dict[str, Any]:
+    return {
+        "id": row[0],
+        "url": row[1],
+        "chunk_number": row[2],
+        "language": row[3],
+        "content": row[4],
+        "summary": row[5],
+        "metadata": row[6] if isinstance(row[6], dict) else {},
+        "similarity_score": float(row[7]),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -943,27 +1317,37 @@ def rerank_results(
         return results[:top_k]
 
     try:
-        from sentence_transformers import CrossEncoder  # noqa: PLC0415
-        model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-        pairs = [(query, r["content"]) for r in results]
-        scores = model.predict(pairs)
-        for i, r in enumerate(results):
-            r["rerank_score"] = float(scores[i])
-        return sorted(results, key=lambda x: x.get("rerank_score", 0), reverse=True)[:top_k]
+        return _rerank_with_cross_encoder(query, results, top_k)
     except Exception as exc:
         logger.warning(f"Reranking failed, returning original order: {exc}")
         return results[:top_k]
 
 
+def _rerank_with_cross_encoder(
+    query: str,
+    results: List[Dict[str, Any]],
+    top_k: int,
+) -> List[Dict[str, Any]]:
+    from sentence_transformers import CrossEncoder  # noqa: PLC0415
+
+    model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+    pairs = [(query, result["content"]) for result in results]
+    scores = model.predict(pairs)
+    for index, result in enumerate(results):
+        result["rerank_score"] = float(scores[index])
+    return sorted(results, key=lambda item: item.get("rerank_score", 0), reverse=True)[:top_k]
+
+
 # ---------------------------------------------------------------------------
 # Code example extraction helper
 # ---------------------------------------------------------------------------
-def extract_code_blocks(markdown: str) -> List[Dict[str, str]]:
+def extract_code_blocks(markdown: str) -> List[Dict[str, Any]]:
     """
     Extract fenced code blocks from markdown text.
     Returns list of {language, content} dicts.
     """
     import re
+
     pattern = re.compile(r"```(\w*)\n(.*?)```", re.DOTALL)
     blocks = []
     for match in pattern.finditer(markdown):
@@ -981,41 +1365,55 @@ def extract_link_references(references_markdown: str) -> List[Dict[str, str]]:
 
     extracted: List[Dict[str, str]] = []
     for line in references_markdown.splitlines():
-        candidate = line.strip()
-        if not candidate:
-            continue
-
-        markdown_ref = re.match(r"^\[(?P<label>[^\]]+)\]\s*:\s*(?P<url>https?://\S+)(?:\s+(?P<text>.*))?$", candidate)
-        if markdown_ref:
-            extracted.append(
-                {
-                    "label": markdown_ref.group("label"),
-                    "url": markdown_ref.group("url"),
-                    "text": (markdown_ref.group("text") or "").strip(),
-                }
-            )
-            continue
-
-        markdown_link = re.search(r"\[(?P<text>[^\]]+)\]\((?P<url>https?://[^)]+)\)", candidate)
-        if markdown_link:
-            extracted.append(
-                {
-                    "label": str(len(extracted) + 1),
-                    "url": markdown_link.group("url"),
-                    "text": markdown_link.group("text").strip(),
-                }
-            )
-            continue
-
-        plain_url = re.search(r"(?P<url>https?://\S+)", candidate)
-        if plain_url:
-            label_match = re.match(r"^(?P<label>\d+)[\.:\)]", candidate)
-            extracted.append(
-                {
-                    "label": label_match.group("label") if label_match else str(len(extracted) + 1),
-                    "url": plain_url.group("url"),
-                    "text": candidate,
-                }
-            )
+        extracted_ref = _extract_reference_from_line(line, len(extracted))
+        if extracted_ref is not None:
+            extracted.append(extracted_ref)
 
     return extracted
+
+
+def _extract_reference_from_line(line: str, existing_count: int) -> Optional[Dict[str, str]]:
+    candidate = line.strip()
+    if not candidate:
+        return None
+
+    for parser in (_parse_markdown_reference, _parse_markdown_link_reference, _parse_plain_url_reference):
+        parsed = parser(candidate, existing_count)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _parse_markdown_reference(candidate: str, existing_count: int) -> Optional[Dict[str, str]]:
+    _ = existing_count
+    markdown_ref = re.match(r"^\[(?P<label>[^\]]+)\]\s*:\s*(?P<url>https?://\S+)(?:\s+(?P<text>.*))?$", candidate)
+    if not markdown_ref:
+        return None
+    return {
+        "label": markdown_ref.group("label"),
+        "url": markdown_ref.group("url"),
+        "text": (markdown_ref.group("text") or "").strip(),
+    }
+
+
+def _parse_markdown_link_reference(candidate: str, existing_count: int) -> Optional[Dict[str, str]]:
+    markdown_link = re.search(r"\[(?P<text>[^\]]+)\]\((?P<url>https?://[^)]+)\)", candidate)
+    if not markdown_link:
+        return None
+    return {
+        "label": str(existing_count + 1),
+        "url": markdown_link.group("url"),
+        "text": markdown_link.group("text").strip(),
+    }
+
+
+def _parse_plain_url_reference(candidate: str, existing_count: int) -> Optional[Dict[str, str]]:
+    plain_url = re.search(r"(?P<url>https?://\S+)", candidate)
+    if not plain_url:
+        return None
+    label_match = re.match(r"^(?P<label>\d+)[\.:\)]", candidate)
+    return {
+        "label": label_match.group("label") if label_match else str(existing_count + 1),
+        "url": plain_url.group("url"),
+        "text": candidate,
+    }

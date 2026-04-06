@@ -17,6 +17,7 @@ Structure:
     test, and exits with code 1 if any test failed.  A failure in one test
     does NOT prevent subsequent tests from running.
 """
+
 import asyncio
 import json
 import os
@@ -44,13 +45,7 @@ SMOKE_STRUCT_URL = f"{SMOKE_BASE_URL}/index-structured-test"
 SMOKE_CODE_URL = f"{SMOKE_BASE_URL}/index-code-test"
 SMOKE_PROVENANCE_URL = f"{SMOKE_BASE_URL}/provenance-test"
 
-CODE_MD = (
-    "# Code Example\n\n"
-    "```python\n"
-    "def hello_world():\n"
-    "    return 'Hello, World!'\n"
-    "```\n"
-)
+CODE_MD = "# Code Example\n\n```python\ndef hello_world():\n    return 'Hello, World!'\n```\n"
 
 # ---------------------------------------------------------------------------
 # Shared state
@@ -170,9 +165,7 @@ async def test_tool_registration(ctx: TestContext) -> None:
     if EXPECT_NEW_TOOLS:
         required_new = {"crawl_url", "crawl_deep", "crawl_adaptive"}
         missing_new = sorted(required_new - set(ctx.tool_names))
-        assert not missing_new, (
-            f"EXPECT_NEW_TOOLS=true but missing: {missing_new}; available={ctx.tool_names}"
-        )
+        assert not missing_new, f"EXPECT_NEW_TOOLS=true but missing: {missing_new}; available={ctx.tool_names}"
         print(f"    strict rollout mode: verified new tools {sorted(required_new)}")
 
 
@@ -276,9 +269,7 @@ async def test_crawl_to_markdown(ctx: TestContext) -> None:
     assert data2["success"], f"crawl_to_markdown(index_variants=both) failed: {data2}"
     assert data2.get("index_variants_override") == "both"
     assert "indexed_variants" in data2, "Expected indexed_variants in response"
-    assert "raw_markdown" in data2.get("indexed_variants", []), (
-        f"Expected raw_markdown to be indexed: {data2}"
-    )
+    assert "raw_markdown" in data2.get("indexed_variants", []), f"Expected raw_markdown to be indexed: {data2}"
 
 
 async def test_crawl_many_urls(ctx: TestContext) -> None:
@@ -355,9 +346,7 @@ async def test_crawl_with_browser_config(ctx: TestContext) -> None:
     )
     data = json.loads(result.data)
     assert data["success"], f"crawl_with_browser_config failed: {data}"
-    assert data.get("chunks_stored", 0) >= 1, (
-        f"crawl_with_browser_config indexed 0 chunks: {data}"
-    )
+    assert data.get("chunks_stored", 0) >= 1, f"crawl_with_browser_config indexed 0 chunks: {data}"
 
 
 async def test_crawl_with_auth_hooks(ctx: TestContext) -> None:
@@ -376,9 +365,7 @@ async def test_crawl_with_auth_hooks(ctx: TestContext) -> None:
     data = json.loads(result.data)
     assert data["success"], f"crawl_with_auth_hooks failed: {data}"
     assert data["workflow_mode"] == "direct_auth_hooks"
-    assert data.get("chunks_stored", 0) >= 1, (
-        f"crawl_with_auth_hooks indexed 0 chunks: {data}"
-    )
+    assert data.get("chunks_stored", 0) >= 1, f"crawl_with_auth_hooks indexed 0 chunks: {data}"
 
 
 async def test_crawl_login_required(ctx: TestContext) -> None:
@@ -394,9 +381,7 @@ async def test_crawl_login_required(ctx: TestContext) -> None:
     )
     data = json.loads(result.data)
     assert data["success"], f"crawl_login_required failed: {data}"
-    assert data.get("chunks_stored", 0) >= 1, (
-        f"crawl_login_required indexed 0 chunks: {data}"
-    )
+    assert data.get("chunks_stored", 0) >= 1, f"crawl_login_required indexed 0 chunks: {data}"
 
 
 async def test_crawl_paginated(ctx: TestContext) -> None:
@@ -428,9 +413,7 @@ async def test_ingest_content_directory(ctx: TestContext) -> None:
     data = json.loads(result.data)
     assert data["success"], f"ingest_content_directory failed: {data}"
     assert data.get("files_discovered", 0) >= 1, "Expected >=1 file discovered"
-    assert data.get("indexed_count", 0) >= 1, (
-        f"ingest_content_directory indexed 0 files: {data}"
-    )
+    assert data.get("indexed_count", 0) >= 1, f"ingest_content_directory indexed 0 files: {data}"
 
 
 # ---------------------------------------------------------------------------
@@ -440,9 +423,7 @@ async def test_ingest_content_directory(ctx: TestContext) -> None:
 
 async def test_session_lifecycle(ctx: TestContext) -> None:
     """create_session -> inspect_session (active=True) -> kill_session."""
-    create_data = json.loads(
-        (await ctx.client.call_tool("create_session", {"session_id": "smoke-test-session"})).data
-    )
+    create_data = json.loads((await ctx.client.call_tool("create_session", {"session_id": "smoke-test-session"})).data)
     assert create_data["success"], f"create_session failed: {create_data}"
     assert create_data["session_id"] == "smoke-test-session"
 
@@ -452,9 +433,7 @@ async def test_session_lifecycle(ctx: TestContext) -> None:
     assert inspect_data["success"], f"inspect_session failed: {inspect_data}"
     assert inspect_data["active"] is True
 
-    kill_data = json.loads(
-        (await ctx.client.call_tool("kill_session", {"session_id": "smoke-test-session"})).data
-    )
+    kill_data = json.loads((await ctx.client.call_tool("kill_session", {"session_id": "smoke-test-session"})).data)
     assert kill_data["success"], f"kill_session failed: {kill_data}"
 
 
@@ -466,9 +445,7 @@ async def test_session_lifecycle(ctx: TestContext) -> None:
 async def test_extract_markdown_variants(ctx: TestContext) -> None:
     """extract_markdown_variants must return raw_markdown + fit_markdown and store >=1 chunk."""
     data = json.loads(
-        (await ctx.client.call_tool(
-            "extract_markdown_variants", {"url": TEST_URL, "index_result": False}
-        )).data
+        (await ctx.client.call_tool("extract_markdown_variants", {"url": TEST_URL, "index_result": False})).data
     )
     assert data["success"], f"extract_markdown_variants failed: {data}"
     assert "raw_markdown" in data, "Expected raw_markdown in extract_markdown_variants output"
@@ -485,16 +462,12 @@ async def test_extract_markdown_variants(ctx: TestContext) -> None:
     assert data2["success"], f"extract_markdown_variants(index_result=True) failed: {data2}"
     assert data2.get("index_variants_override") == "both"
     assert "indexed_variants" in data2
-    assert data2.get("chunks_stored", 0) >= 1, (
-        f"extract_markdown_variants wrote 0 chunks: {data2}"
-    )
+    assert data2.get("chunks_stored", 0) >= 1, f"extract_markdown_variants wrote 0 chunks: {data2}"
 
 
 async def test_extract_fit_markdown(ctx: TestContext) -> None:
     """extract_fit_markdown must succeed and return fit_markdown variant."""
-    data = json.loads(
-        (await ctx.client.call_tool("extract_fit_markdown", {"url": TEST_URL})).data
-    )
+    data = json.loads((await ctx.client.call_tool("extract_fit_markdown", {"url": TEST_URL})).data)
     assert data["success"], f"extract_fit_markdown failed: {data}"
     assert data.get("selected_variant") == "fit_markdown", "Expected fit_markdown variant"
 
@@ -561,12 +534,8 @@ async def test_extract_structured_json(ctx: TestContext) -> None:
             )
         ).data
     )
-    assert struct_fit_data["success"], (
-        f"extract_structured_json(fit_source=True) failed: {struct_fit_data}"
-    )
-    assert "normalized_output" in struct_fit_data, (
-        "Expected normalized_output in structured extraction response"
-    )
+    assert struct_fit_data["success"], f"extract_structured_json(fit_source=True) failed: {struct_fit_data}"
+    assert "normalized_output" in struct_fit_data, "Expected normalized_output in structured extraction response"
 
 
 async def test_extract_regex_entities(ctx: TestContext) -> None:
@@ -604,9 +573,7 @@ async def test_extract_knowledge_graph(ctx: TestContext) -> None:
     if not EXPECT_NEW_TOOLS:
         print("    skipped -- set EXPECT_NEW_TOOLS=true to test LLM-backed extraction")
         return
-    data = json.loads(
-        (await ctx.client.call_tool("extract_knowledge_graph", {"url": TEST_URL})).data
-    )
+    data = json.loads((await ctx.client.call_tool("extract_knowledge_graph", {"url": TEST_URL})).data)
     assert data["success"], f"extract_knowledge_graph failed: {data}"
 
 
@@ -623,10 +590,7 @@ async def test_index_markdown(ctx: TestContext) -> None:
                 "index_markdown",
                 {
                     "url": SMOKE_INDEX_URL,
-                    "markdown": (
-                        "# Smoke Test Document\n\n"
-                        "This is e2e smoke test content for retrieval verification."
-                    ),
+                    "markdown": ("# Smoke Test Document\n\nThis is e2e smoke test content for retrieval verification."),
                     "metadata": {"smoke_test": True},
                 },
             )
@@ -636,9 +600,7 @@ async def test_index_markdown(ctx: TestContext) -> None:
     assert data["chunks_stored"] >= 1, "Expected >=1 chunk from index_markdown"
     assert "first_chunk_id" in data, "Expected first_chunk_id in index_markdown response"
     first_id = data.get("first_chunk_id")
-    assert first_id is not None and first_id > 0, (
-        f"Expected a positive integer first_chunk_id; got {first_id}"
-    )
+    assert first_id is not None and first_id > 0, f"Expected a positive integer first_chunk_id; got {first_id}"
     ctx.first_chunk_id = first_id
 
 
@@ -650,10 +612,7 @@ async def test_index_fit_markdown(ctx: TestContext) -> None:
                 "index_fit_markdown",
                 {
                     "url": SMOKE_FIT_URL,
-                    "fit_markdown": (
-                        "# Fit Markdown Smoke Test\n\n"
-                        "Indexed fit markdown for retrieval testing."
-                    ),
+                    "fit_markdown": ("# Fit Markdown Smoke Test\n\nIndexed fit markdown for retrieval testing."),
                     "metadata": {"smoke_test": True},
                 },
             )
@@ -697,9 +656,7 @@ async def test_index_code_examples(ctx: TestContext) -> None:
     )
     assert data["success"], f"index_code_examples failed: {data}"
     code_count = data.get("code_examples_indexed", 0)
-    assert code_count >= 1, (
-        f"Expected code_examples_indexed >= 1; got {code_count}: {data}"
-    )
+    assert code_count >= 1, f"Expected code_examples_indexed >= 1; got {code_count}: {data}"
 
 
 async def test_index_provenance(ctx: TestContext) -> None:
@@ -710,16 +667,11 @@ async def test_index_provenance(ctx: TestContext) -> None:
                 "index_markdown",
                 {
                     "url": SMOKE_PROVENANCE_URL,
-                    "markdown": (
-                        "# Provenance Smoke Test\n\n"
-                        "This document proves provenance retrieval works."
-                    ),
+                    "markdown": ("# Provenance Smoke Test\n\nThis document proves provenance retrieval works."),
                     "metadata": {
                         "smoke_test": True,
                         "markdown_variant": "raw_markdown",
-                        "references_markdown": (
-                            "[1]: https://example.com/reference Example reference"
-                        ),
+                        "references_markdown": ("[1]: https://example.com/reference Example reference"),
                         "has_citations": True,
                     },
                 },
@@ -751,12 +703,8 @@ async def test_chunking_strategies(ctx: TestContext) -> None:
                 )
             ).data
         )
-        assert data["success"], (
-            f"index_markdown(chunking_strategy={strategy!r}) failed: {data}"
-        )
-        assert data["chunks_stored"] >= 1, (
-            f"Expected >=1 chunk for strategy={strategy!r}: {data}"
-        )
+        assert data["success"], f"index_markdown(chunking_strategy={strategy!r}) failed: {data}"
+        assert data["chunks_stored"] >= 1, f"Expected >=1 chunk for strategy={strategy!r}: {data}"
         assert data.get("chunking_strategy_applied") == strategy, (
             f"Expected chunking_strategy_applied={strategy!r} in response: {data}"
         )
@@ -780,9 +728,7 @@ async def test_search_documents(ctx: TestContext) -> None:
     assert data["success"], f"search_documents failed: {data}"
     assert len(data["results"]) >= 1, "Expected >=1 result from search_documents (initial)"
     top = data["results"][0]
-    assert "example" in top["content"].lower(), (
-        f"Expected 'example' in content: {top['content']}"
-    )
+    assert "example" in top["content"].lower(), f"Expected 'example' in content: {top['content']}"
 
     data2 = json.loads(
         (
@@ -793,9 +739,7 @@ async def test_search_documents(ctx: TestContext) -> None:
         ).data
     )
     assert data2["success"], f"search_documents(post-index) failed: {data2}"
-    assert len(data2["results"]) >= 1, (
-        "Expected >=1 result from search_documents after indexing"
-    )
+    assert len(data2["results"]) >= 1, "Expected >=1 result from search_documents after indexing"
 
 
 async def test_search_raw_markdown(ctx: TestContext) -> None:
@@ -887,14 +831,9 @@ async def test_search_provenance(ctx: TestContext) -> None:
     )
     assert data["success"], f"search_documents(include_provenance) failed: {data}"
     provenance_hits = [h for h in data["results"] if h.get("url") == SMOKE_PROVENANCE_URL]
-    assert provenance_hits, (
-        f"Expected provenance smoke URL '{SMOKE_PROVENANCE_URL}' in results: {data}"
-    )
+    assert provenance_hits, f"Expected provenance smoke URL '{SMOKE_PROVENANCE_URL}' in results: {data}"
     assert provenance_hits[0]["provenance"]["has_citations"] is True
-    assert (
-        provenance_hits[0]["provenance"]["link_references"][0]["url"]
-        == "https://example.com/reference"
-    )
+    assert provenance_hits[0]["provenance"]["link_references"][0]["url"] == "https://example.com/reference"
 
 
 async def test_search_freshness_controls(ctx: TestContext) -> None:
@@ -935,31 +874,23 @@ async def test_get_document_by_id_round_trip(ctx: TestContext) -> None:
             )
         ).data
     )
-    assert data["success"], (
-        f"get_document_by_id({ctx.first_chunk_id}) returned failure: {data}"
-    )
+    assert data["success"], f"get_document_by_id({ctx.first_chunk_id}) returned failure: {data}"
     assert "document" in data, "Expected 'document' key in get_document_by_id response"
     doc = data["document"]
-    assert doc["url"] == SMOKE_INDEX_URL, (
-        f"Expected url={SMOKE_INDEX_URL!r}, got {doc['url']!r}"
-    )
+    assert doc["url"] == SMOKE_INDEX_URL, f"Expected url={SMOKE_INDEX_URL!r}, got {doc['url']!r}"
     assert doc["id"] == ctx.first_chunk_id
 
 
 async def test_get_markdown_by_url(ctx: TestContext) -> None:
     """get_markdown_by_url must return >=1 chunk for a previously indexed URL."""
-    data = json.loads(
-        (await ctx.client.call_tool("get_markdown_by_url", {"url": TEST_URL})).data
-    )
+    data = json.loads((await ctx.client.call_tool("get_markdown_by_url", {"url": TEST_URL})).data)
     assert data["success"], f"get_markdown_by_url failed: {data}"
     assert data["chunk_count"] >= 1, "Expected >=1 stored chunk from get_markdown_by_url"
 
 
 async def test_get_fit_markdown_by_url(ctx: TestContext) -> None:
     """get_fit_markdown_by_url must return >=1 chunk for the fit-markdown smoke URL."""
-    data = json.loads(
-        (await ctx.client.call_tool("get_fit_markdown_by_url", {"url": SMOKE_FIT_URL})).data
-    )
+    data = json.loads((await ctx.client.call_tool("get_fit_markdown_by_url", {"url": SMOKE_FIT_URL})).data)
     assert data["success"], f"get_fit_markdown_by_url failed: {data}"
     assert data["chunk_count"] >= 1, "Expected >=1 fit markdown chunk"
 
@@ -976,9 +907,7 @@ async def test_get_markdown_provenance(ctx: TestContext) -> None:
     )
     assert data["success"], f"get_markdown_by_url(include_provenance) failed: {data}"
     assert data["provenance"]["has_citations"] is True
-    assert (
-        data["provenance"]["link_references"][0]["url"] == "https://example.com/reference"
-    )
+    assert data["provenance"]["link_references"][0]["url"] == "https://example.com/reference"
 
 
 # ---------------------------------------------------------------------------
@@ -996,9 +925,7 @@ async def test_error_index_empty_content(ctx: TestContext) -> None:
             )
         ).data
     )
-    assert data["success"] is False, (
-        f"Expected failure when indexing empty markdown; got: {data}"
-    )
+    assert data["success"] is False, f"Expected failure when indexing empty markdown; got: {data}"
     assert "error" in data, "Expected 'error' key in failure response"
 
 
@@ -1012,9 +939,7 @@ async def test_error_crawl_raw_html_empty(ctx: TestContext) -> None:
             )
         ).data
     )
-    assert data["success"] is False, (
-        f"Expected failure when crawling empty HTML; got: {data}"
-    )
+    assert data["success"] is False, f"Expected failure when crawling empty HTML; got: {data}"
     assert "error" in data, "Expected 'error' key in failure response"
 
 
@@ -1028,9 +953,7 @@ async def test_error_get_document_nonexistent(ctx: TestContext) -> None:
             )
         ).data
     )
-    assert data["success"] is False, (
-        f"Expected success=False for non-existent document ID; got: {data}"
-    )
+    assert data["success"] is False, f"Expected success=False for non-existent document ID; got: {data}"
     assert "error" in data, "Expected 'error' key in not-found response"
 
 
@@ -1116,7 +1039,7 @@ async def run_smoke_tests() -> None:
         print(f"\nFailed tests ({len(failed)}):")
         for n in failed:
             print(f"  - {n}")
-        print(f"\n=== Smoke tests FAILED ===")
+        print("\n=== Smoke tests FAILED ===")
         sys.exit(1)
     else:
         print(f"\n=== All {total} smoke tests PASSED ===")

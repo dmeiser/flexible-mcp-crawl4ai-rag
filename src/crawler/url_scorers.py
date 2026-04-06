@@ -1,4 +1,5 @@
 """Extensible URL scorer factory for deep crawl strategies."""
+
 from typing import Any, Callable, Dict, List, Optional
 
 from crawl4ai import KeywordRelevanceScorer
@@ -21,6 +22,15 @@ class UrlScorerFactory:
     def supported(self) -> List[str]:
         return sorted(self._builders.keys())
 
+    def _normalized_scorer_type(self, scorer_type: str) -> str:
+        return (scorer_type or "").strip().lower()
+
+    def _resolve_builder(self, normalized: str) -> ScorerBuilder | None:
+        builder = self._builders.get(normalized)
+        if builder is not None:
+            return builder
+        return self._builders.get("keyword")
+
     def build(
         self,
         scorer_type: str,
@@ -28,15 +38,11 @@ class UrlScorerFactory:
         keywords: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> Any:
-        normalized = (scorer_type or "").strip().lower()
+        normalized = self._normalized_scorer_type(scorer_type)
         if not normalized or normalized == "none":
             return None
 
-        builder = self._builders.get(normalized)
-        if builder is None:
-            # Safe fallback to keyword scorer type for unknown values.
-            builder = self._builders.get("keyword")
-            normalized = "keyword"
+        builder = self._resolve_builder(normalized)
 
         if builder is None:
             return None

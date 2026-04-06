@@ -4,25 +4,24 @@ MCP server for web crawling with Crawl4AI.
 Provides tools to crawl websites, store content using pgvector, and perform
 RAG queries. Uses FastMCP 3.2.0 with async lifespan.
 """
-import sys
-import os
+
 import asyncio
 import logging
-from contextlib import asynccontextmanager
+import os
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from types import SimpleNamespace
 from pathlib import Path
-from dotenv import load_dotenv
+from types import SimpleNamespace
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
-
-from fastmcp import FastMCP, Context
 from crawl4ai import AsyncWebCrawler, BrowserConfig
-
-from src.utils import get_session, engine, settings
+from dotenv import load_dotenv
+from fastmcp import Context, FastMCP
 from sqlmodel import text
-from sqlalchemy.orm import Session
+
+from src.utils import get_session, settings
 
 # Load .env from project root before any settings are imported
 project_root = Path(__file__).resolve().parent.parent
@@ -49,6 +48,7 @@ def _make_scheduler_ctx(crawler: AsyncWebCrawler) -> Context:
 async def _job_compute_value_scores(crawler: AsyncWebCrawler) -> None:
     try:
         from src.crawler import tool_definitions as _td
+
         await _td.compute_value_scores(_make_scheduler_ctx(crawler), limit=2000)
     except Exception as exc:
         logger.error(f"scheduled job compute_value_scores failed: {exc}", exc_info=True)
@@ -57,6 +57,7 @@ async def _job_compute_value_scores(crawler: AsyncWebCrawler) -> None:
 async def _job_recrawl_due_sources(crawler: AsyncWebCrawler) -> None:
     try:
         from src.crawler import tool_definitions as _td
+
         await _td.recrawl_due_sources(_make_scheduler_ctx(crawler), max_concurrent=5)
     except Exception as exc:
         logger.error(f"scheduled job recrawl_due_sources failed: {exc}", exc_info=True)
@@ -65,6 +66,7 @@ async def _job_recrawl_due_sources(crawler: AsyncWebCrawler) -> None:
 async def _job_prune_stale_content(crawler: AsyncWebCrawler) -> None:
     try:
         from src.crawler import tool_definitions as _td
+
         await _td.prune_stale_content(_make_scheduler_ctx(crawler), force=False)
     except Exception as exc:
         logger.error(f"scheduled job prune_stale_content failed: {exc}", exc_info=True)
@@ -73,6 +75,7 @@ async def _job_prune_stale_content(crawler: AsyncWebCrawler) -> None:
 async def _job_enforce_storage_budget(crawler: AsyncWebCrawler) -> None:
     try:
         from src.crawler import tool_definitions as _td
+
         await _td.enforce_storage_budget(_make_scheduler_ctx(crawler), force=False)
     except Exception as exc:
         logger.error(f"scheduled job enforce_storage_budget failed: {exc}", exc_info=True)
@@ -81,6 +84,7 @@ async def _job_enforce_storage_budget(crawler: AsyncWebCrawler) -> None:
 async def _job_hard_delete_tombstones(crawler: AsyncWebCrawler) -> None:
     try:
         from src.crawler import tool_definitions as _td
+
         await _td.hard_delete_tombstones(_make_scheduler_ctx(crawler), max_age_hours=24)
     except Exception as exc:
         logger.error(f"scheduled job hard_delete_tombstones failed: {exc}", exc_info=True)
@@ -89,6 +93,7 @@ async def _job_hard_delete_tombstones(crawler: AsyncWebCrawler) -> None:
 async def _job_detect_content_drift(crawler: AsyncWebCrawler) -> None:
     try:
         from src.crawler import tool_definitions as _td
+
         await _td.detect_content_drift(_make_scheduler_ctx(crawler), trigger_selective_reembed=True)
     except Exception as exc:
         logger.error(f"scheduled job detect_content_drift failed: {exc}", exc_info=True)
@@ -106,7 +111,7 @@ async def lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     logger.info("Checking DB connection...")
     try:
         with next(get_session()) as session:
-            session.exec(text("SELECT 1")).first()
+            session.execute(text("SELECT 1")).first()
         logger.info("DB connection OK.")
     except Exception as exc:
         logger.error(f"DB connection failed: {exc}")

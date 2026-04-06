@@ -27,6 +27,12 @@ test = [
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=4.0.0",
 ]
+lint = [
+    "ruff>=0.11.0",
+    "mypy>=1.15.0",
+    "radon>=6.0.1",
+    "isort>=5.13.0",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -49,3 +55,28 @@ omit = [
 [tool.coverage.report]
 fail_under = 100
 show_missing = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+
+[tool.isort]
+profile = "black"
+line_length = 120
+py_version = 312
+skip_gitignore = true
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+plugins = ["sqlalchemy.ext.mypy.plugin"]
+ignore_missing_imports = true
+follow_imports = "silent"
+warn_unused_ignores = true
+warn_redundant_casts = true
+check_untyped_defs = true
+show_error_codes = true
+pretty = true
