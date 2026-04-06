@@ -61,13 +61,10 @@ services:
     container_name: docs-rag-mcp-ext
     profiles:
       - external
-    ports:
-      - "${PORT:-8051}:${PORT:-8051}"
+    network_mode: host
     env_file:
       - .env
     restart: unless-stopped
-    networks:
-      - backend
 
   # -----------------------------------------------------------------------
   # Ollama: local embedding model server

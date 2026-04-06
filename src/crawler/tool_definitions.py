@@ -411,8 +411,20 @@ def _bm25_filter(query: Optional[str], threshold: Optional[float]) -> Any:
     return BM25ContentFilter(user_query=query, bm25_threshold=_numeric_threshold(threshold, 1.0))
 
 
+def _resolved_llm_config(llm_provider: Optional[str]) -> LLMConfig:
+    provider = (
+        llm_provider
+        or settings.effective_agentic_model_name
+        or settings.effective_hybrid_model_name
+        or "openai/gpt-4o"
+    )
+    api_token = settings.effective_agentic_api_key or settings.effective_hybrid_api_key
+    base_url = settings.effective_agentic_base_url or settings.effective_hybrid_base_url
+    return LLMConfig(provider=provider, api_token=api_token, base_url=base_url)
+
+
 def _llm_filter(instruction: Optional[str], llm_provider: Optional[str]) -> Any:
-    llm_cfg = LLMConfig(provider=llm_provider or "openai/gpt-4o")
+    llm_cfg = _resolved_llm_config(llm_provider)
     return LLMContentFilter(
         llm_config=llm_cfg,
         instruction=instruction or "Keep only the most relevant content for the user query.",
@@ -495,7 +507,7 @@ def _regex_strategy(patterns: Optional[Dict[str, str]]) -> Any:
 
 
 def _llm_strategy(schema: Optional[Dict[str, Any]], instruction: Optional[str], llm_provider: Optional[str]) -> Any:
-    llm_config = LLMConfig(provider=llm_provider or "openai/gpt-4o")
+    llm_config = _resolved_llm_config(llm_provider)
     return LLMExtractionStrategy(
         llm_config=llm_config,
         instruction=instruction or "Extract structured data from the content.",

@@ -104,24 +104,95 @@ class Settings(BaseSettings):
     MARKDOWN_INDEX_POLICY: MarkdownIndexPolicy = MarkdownIndexPolicy.BOTH_BY_DEFAULT
     MARKDOWN_FALLBACK_ENABLED: bool = True
 
-    # LLM for contextual embeddings
-    LLM_ENABLED: bool = False
-    LLM_API_KEY: Optional[str] = None
-    LLM_BASE_URL: Optional[str] = None
-    LLM_MODEL_NAME: Optional[str] = None
+    # ---------------------------------------------------------------------------
+    # Default LLM — shared fallback for all LLM-powered features below.
+    # If a feature-specific override is not set it falls back to these values.
+    # ---------------------------------------------------------------------------
+    DEFAULT_LLM_BASE_URL: Optional[str] = None
+    DEFAULT_LLM_API_KEY: Optional[str] = None
+    DEFAULT_LLM_MODEL_NAME: Optional[str] = None
+
+    # Per-feature LLM overrides — all fall back to DEFAULT_LLM_* when unset.
+    # A feature's LLM is considered active when its effective model name is set.
+
+    # 1. Contextual embeddings (requires USE_CONTEXTUAL_EMBEDDINGS=true)
+    CONTEXTUAL_LLM_BASE_URL: Optional[str] = None
+    CONTEXTUAL_LLM_API_KEY: Optional[str] = None
+    CONTEXTUAL_LLM_MODEL_NAME: Optional[str] = None
+
+    # 2. Hybrid search
+    HYBRID_LLM_BASE_URL: Optional[str] = None
+    HYBRID_LLM_API_KEY: Optional[str] = None
+    HYBRID_LLM_MODEL_NAME: Optional[str] = None
+
+    # 3. Agentic RAG (requires USE_AGENTIC_RAG=true)
+    AGENTIC_LLM_BASE_URL: Optional[str] = None
+    AGENTIC_LLM_API_KEY: Optional[str] = None
+    AGENTIC_LLM_MODEL_NAME: Optional[str] = None
+
+    # 4. Reranking (requires USE_RERANKING=true)
+    #    RERANK_LLM_MODEL_NAME also doubles as the local CrossEncoder model name
+    #    when no BASE_URL is configured.
+    RERANK_LLM_BASE_URL: Optional[str] = None
+    RERANK_LLM_API_KEY: Optional[str] = None
+    RERANK_LLM_MODEL_NAME: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    @model_validator(mode="after")
-    def check_llm_config_if_enabled(self) -> "Settings":
-        if self.LLM_ENABLED:
-            if not self.LLM_API_KEY:
-                raise ValueError("LLM_API_KEY must be set when LLM_ENABLED is true.")
-            if not self.LLM_BASE_URL:
-                raise ValueError("LLM_BASE_URL must be set when LLM_ENABLED is true.")
-            if not self.LLM_MODEL_NAME:
-                raise ValueError("LLM_MODEL_NAME must be set when LLM_ENABLED is true.")
-        return self
+    # ---------------------------------------------------------------------------
+    # Computed effective configs (feature override → DEFAULT_LLM_* fallback)
+    # ---------------------------------------------------------------------------
+    @property
+    def effective_contextual_base_url(self) -> Optional[str]:
+        return self.CONTEXTUAL_LLM_BASE_URL or self.DEFAULT_LLM_BASE_URL
+
+    @property
+    def effective_contextual_api_key(self) -> Optional[str]:
+        return self.CONTEXTUAL_LLM_API_KEY or self.DEFAULT_LLM_API_KEY
+
+    @property
+    def effective_contextual_model_name(self) -> Optional[str]:
+        return self.CONTEXTUAL_LLM_MODEL_NAME or self.DEFAULT_LLM_MODEL_NAME
+
+    @property
+    def effective_hybrid_base_url(self) -> Optional[str]:
+        return self.HYBRID_LLM_BASE_URL or self.DEFAULT_LLM_BASE_URL
+
+    @property
+    def effective_hybrid_api_key(self) -> Optional[str]:
+        return self.HYBRID_LLM_API_KEY or self.DEFAULT_LLM_API_KEY
+
+    @property
+    def effective_hybrid_model_name(self) -> Optional[str]:
+        return self.HYBRID_LLM_MODEL_NAME or self.DEFAULT_LLM_MODEL_NAME
+
+    @property
+    def effective_agentic_base_url(self) -> Optional[str]:
+        return self.AGENTIC_LLM_BASE_URL or self.DEFAULT_LLM_BASE_URL
+
+    @property
+    def effective_agentic_api_key(self) -> Optional[str]:
+        return self.AGENTIC_LLM_API_KEY or self.DEFAULT_LLM_API_KEY
+
+    @property
+    def effective_agentic_model_name(self) -> Optional[str]:
+        return self.AGENTIC_LLM_MODEL_NAME or self.DEFAULT_LLM_MODEL_NAME
+
+    @property
+    def effective_rerank_base_url(self) -> Optional[str]:
+        return self.RERANK_LLM_BASE_URL or self.DEFAULT_LLM_BASE_URL
+
+    @property
+    def effective_rerank_api_key(self) -> Optional[str]:
+        return self.RERANK_LLM_API_KEY or self.DEFAULT_LLM_API_KEY
+
+    @property
+    def effective_rerank_model_name(self) -> str:
+        return (
+            self.RERANK_LLM_MODEL_NAME
+            or self.DEFAULT_LLM_MODEL_NAME
+            or "cross-encoder/ms-marco-MiniLM-L-6-v2"
+        )
 
     @model_validator(mode="after")
     def check_openai_config_if_selected(self) -> "Settings":
@@ -479,7 +550,7 @@ async def generate_contextual_text(full_document: str, chunk: str) -> Tuple[str,
     Generate a contextual summary prefix for a chunk using an LLM.
     Returns (enriched_text, was_enriched).
     """
-    if not settings.USE_CONTEXTUAL_EMBEDDINGS or not settings.LLM_ENABLED:
+    if not settings.USE_CONTEXTUAL_EMBEDDINGS or not settings.effective_contextual_model_name:
         return chunk, False
 
     try:
@@ -505,14 +576,14 @@ def _context_prompt(full_document: str, chunk: str) -> str:
 
 
 async def _request_contextual_summary(full_document: str, chunk: str) -> str:
-    if not settings.LLM_MODEL_NAME:
-        logger.warning("LLM_MODEL_NAME is not configured; skipping contextual enrichment.")
+    if not settings.effective_contextual_model_name:
+        logger.warning("CONTEXTUAL_LLM_MODEL_NAME (or DEFAULT_LLM_MODEL_NAME) is not configured; skipping contextual enrichment.")
         return ""
 
-    client = AsyncOpenAI(api_key=settings.LLM_API_KEY, base_url=settings.LLM_BASE_URL)
+    client = AsyncOpenAI(api_key=settings.effective_contextual_api_key, base_url=settings.effective_contextual_base_url)
     try:
         resp = await client.chat.completions.create(
-            model=settings.LLM_MODEL_NAME,
+            model=settings.effective_contextual_model_name,
             messages=[{"role": "user", "content": _context_prompt(full_document, chunk)}],
             max_tokens=150,
         )
@@ -800,7 +871,7 @@ async def _embedding_texts_for_documents(
 
 
 def _should_enrich_with_context(full_documents: Optional[List[str]]) -> bool:
-    return bool(settings.USE_CONTEXTUAL_EMBEDDINGS and settings.LLM_ENABLED and full_documents)
+    return bool(settings.USE_CONTEXTUAL_EMBEDDINGS and settings.effective_contextual_model_name and full_documents)
 
 
 async def _insert_document_batches(
@@ -1330,7 +1401,7 @@ def _rerank_with_cross_encoder(
 ) -> List[Dict[str, Any]]:
     from sentence_transformers import CrossEncoder  # noqa: PLC0415
 
-    model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+    model = CrossEncoder(settings.effective_rerank_model_name)
     pairs = [(query, result["content"]) for result in results]
     scores = model.predict(pairs)
     for index, result in enumerate(results):

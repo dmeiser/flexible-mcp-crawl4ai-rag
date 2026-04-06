@@ -429,7 +429,7 @@ class TestWaveAndPhase4HelperCoverage:
             )
 
             assert gen is not None
-            mock_cfg.assert_called_once_with(provider="openai/gpt-4o-mini")
+            mock_cfg.assert_called_once_with(provider="openai/gpt-4o-mini", api_token=None, base_url=None)
             mock_filter.assert_called_once()
             mock_gen.assert_called_once()
 

@@ -15,7 +15,7 @@ os.environ.setdefault("EMBEDDING_DIM", "4")
 os.environ.setdefault("OLLAMA_MAX_RETRIES", "2")
 os.environ.setdefault("OLLAMA_RETRY_DELAY_SECONDS", "0.01")
 os.environ.setdefault("BATCH_SIZE", "10")
-os.environ.setdefault("LLM_ENABLED", "false")
+os.environ.setdefault("DEFAULT_LLM_MODEL_NAME", "")
 os.environ.setdefault("USE_CONTEXTUAL_EMBEDDINGS", "false")
 os.environ.setdefault("USE_HYBRID_SEARCH", "false")
 os.environ.setdefault("USE_AGENTIC_RAG", "false")
@@ -93,12 +93,65 @@ def _fake_settings(**kw):
         USE_RERANKING=False,
         MARKDOWN_INDEX_POLICY="both-by-default",
         MARKDOWN_FALLBACK_ENABLED=True,
-        LLM_ENABLED=False,
-        LLM_API_KEY=None,
-        LLM_BASE_URL=None,
-        LLM_MODEL_NAME=None,
+        DEFAULT_LLM_API_KEY=None,
+        DEFAULT_LLM_BASE_URL=None,
+        DEFAULT_LLM_MODEL_NAME=None,
+        CONTEXTUAL_LLM_API_KEY=None,
+        CONTEXTUAL_LLM_BASE_URL=None,
+        CONTEXTUAL_LLM_MODEL_NAME=None,
+        HYBRID_LLM_API_KEY=None,
+        HYBRID_LLM_BASE_URL=None,
+        HYBRID_LLM_MODEL_NAME=None,
+        AGENTIC_LLM_API_KEY=None,
+        AGENTIC_LLM_BASE_URL=None,
+        AGENTIC_LLM_MODEL_NAME=None,
+        RERANK_LLM_API_KEY=None,
+        RERANK_LLM_BASE_URL=None,
+        RERANK_LLM_MODEL_NAME="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        effective_contextual_api_key=None,
+        effective_contextual_base_url=None,
+        effective_contextual_model_name=None,
+        effective_hybrid_api_key=None,
+        effective_hybrid_base_url=None,
+        effective_hybrid_model_name=None,
+        effective_agentic_api_key=None,
+        effective_agentic_base_url=None,
+        effective_agentic_model_name=None,
+        effective_rerank_api_key=None,
+        effective_rerank_base_url=None,
+        effective_rerank_model_name="cross-encoder/ms-marco-MiniLM-L-6-v2",
     )
     defaults.update(kw)
+    defaults["effective_contextual_api_key"] = defaults.get("CONTEXTUAL_LLM_API_KEY") or defaults.get(
+        "DEFAULT_LLM_API_KEY"
+    )
+    defaults["effective_contextual_base_url"] = defaults.get("CONTEXTUAL_LLM_BASE_URL") or defaults.get(
+        "DEFAULT_LLM_BASE_URL"
+    )
+    defaults["effective_contextual_model_name"] = defaults.get("CONTEXTUAL_LLM_MODEL_NAME") or defaults.get(
+        "DEFAULT_LLM_MODEL_NAME"
+    )
+    defaults["effective_hybrid_api_key"] = defaults.get("HYBRID_LLM_API_KEY") or defaults.get("DEFAULT_LLM_API_KEY")
+    defaults["effective_hybrid_base_url"] = defaults.get("HYBRID_LLM_BASE_URL") or defaults.get("DEFAULT_LLM_BASE_URL")
+    defaults["effective_hybrid_model_name"] = defaults.get("HYBRID_LLM_MODEL_NAME") or defaults.get(
+        "DEFAULT_LLM_MODEL_NAME"
+    )
+    defaults["effective_agentic_api_key"] = defaults.get("AGENTIC_LLM_API_KEY") or defaults.get(
+        "DEFAULT_LLM_API_KEY"
+    )
+    defaults["effective_agentic_base_url"] = defaults.get("AGENTIC_LLM_BASE_URL") or defaults.get(
+        "DEFAULT_LLM_BASE_URL"
+    )
+    defaults["effective_agentic_model_name"] = defaults.get("AGENTIC_LLM_MODEL_NAME") or defaults.get(
+        "DEFAULT_LLM_MODEL_NAME"
+    )
+    defaults["effective_rerank_api_key"] = defaults.get("RERANK_LLM_API_KEY") or defaults.get("DEFAULT_LLM_API_KEY")
+    defaults["effective_rerank_base_url"] = defaults.get("RERANK_LLM_BASE_URL") or defaults.get("DEFAULT_LLM_BASE_URL")
+    defaults["effective_rerank_model_name"] = (
+        defaults.get("RERANK_LLM_MODEL_NAME")
+        or defaults.get("DEFAULT_LLM_MODEL_NAME")
+        or "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    )
     return MagicMock(**defaults)
 
 
@@ -139,44 +192,42 @@ def test_embedding_provider_values():
 
 
 class TestSettingsValidation:
-    def test_llm_enabled_missing_api_key_raises(self):
-        with pytest.raises(Exception, match="LLM_API_KEY"):
-            Settings(
-                POSTGRES_URL="postgresql://u:p@h/db",
-                EMBEDDING_PROVIDER="ollama",
-                OLLAMA_API_URL="http://localhost:11434/api/embeddings",
-                OLLAMA_EMBED_MODEL="m",
-                LLM_ENABLED=True,
-                LLM_API_KEY=None,
-                LLM_BASE_URL="http://llm",
-                LLM_MODEL_NAME="model",
-            )
+    def test_default_llm_settings_are_optional(self):
+        s = Settings(
+            POSTGRES_URL="postgresql://u:p@h/db",
+            EMBEDDING_PROVIDER="ollama",
+            OLLAMA_API_URL="http://localhost:11434/api/embeddings",
+            OLLAMA_EMBED_MODEL="m",
+            DEFAULT_LLM_API_KEY=None,
+            DEFAULT_LLM_BASE_URL=None,
+            DEFAULT_LLM_MODEL_NAME=None,
+        )
+        assert s.DEFAULT_LLM_MODEL_NAME is None
 
-    def test_llm_enabled_missing_base_url_raises(self):
-        with pytest.raises(Exception, match="LLM_BASE_URL"):
-            Settings(
-                POSTGRES_URL="postgresql://u:p@h/db",
-                EMBEDDING_PROVIDER="ollama",
-                OLLAMA_API_URL="http://localhost:11434/api/embeddings",
-                OLLAMA_EMBED_MODEL="m",
-                LLM_ENABLED=True,
-                LLM_API_KEY="key",
-                LLM_BASE_URL=None,
-                LLM_MODEL_NAME="model",
-            )
+    def test_contextual_effective_falls_back_to_default(self):
+        s = Settings(
+            POSTGRES_URL="postgresql://u:p@h/db",
+            EMBEDDING_PROVIDER="ollama",
+            OLLAMA_API_URL="http://localhost:11434/api/embeddings",
+            OLLAMA_EMBED_MODEL="m",
+            DEFAULT_LLM_API_KEY="key",
+            DEFAULT_LLM_BASE_URL="http://llm",
+            DEFAULT_LLM_MODEL_NAME="model",
+        )
+        assert s.effective_contextual_api_key == "key"
+        assert s.effective_contextual_base_url == "http://llm"
+        assert s.effective_contextual_model_name == "model"
 
-    def test_llm_enabled_missing_model_name_raises(self):
-        with pytest.raises(Exception, match="LLM_MODEL_NAME"):
-            Settings(
-                POSTGRES_URL="postgresql://u:p@h/db",
-                EMBEDDING_PROVIDER="ollama",
-                OLLAMA_API_URL="http://localhost:11434/api/embeddings",
-                OLLAMA_EMBED_MODEL="m",
-                LLM_ENABLED=True,
-                LLM_API_KEY="key",
-                LLM_BASE_URL="http://llm",
-                LLM_MODEL_NAME=None,
-            )
+    def test_contextual_override_takes_priority(self):
+        s = Settings(
+            POSTGRES_URL="postgresql://u:p@h/db",
+            EMBEDDING_PROVIDER="ollama",
+            OLLAMA_API_URL="http://localhost:11434/api/embeddings",
+            OLLAMA_EMBED_MODEL="m",
+            DEFAULT_LLM_MODEL_NAME="default-model",
+            CONTEXTUAL_LLM_MODEL_NAME="ctx-model",
+        )
+        assert s.effective_contextual_model_name == "ctx-model"
 
     def test_openai_missing_key_raises(self):
         with pytest.raises(Exception, match="OPENAI_API_KEY"):
@@ -531,14 +582,14 @@ class TestBatchEmbedding:
 class TestContextualText:
     @pytest.mark.asyncio
     async def test_disabled_returns_original(self):
-        with patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)):
+        with patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, DEFAULT_LLM_MODEL_NAME=None)):
             text, enriched = await generate_contextual_text("doc", "chunk")
         assert text == "chunk"
         assert enriched is False
 
     @pytest.mark.asyncio
     async def test_llm_disabled_returns_original(self):
-        with patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=True, LLM_ENABLED=False)):
+        with patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=True, DEFAULT_LLM_MODEL_NAME=None)):
             text, enriched = await generate_contextual_text("doc", "chunk")
         assert text == "chunk"
         assert enriched is False
@@ -556,10 +607,9 @@ class TestContextualText:
                 "src.utils.settings",
                 _fake_settings(
                     USE_CONTEXTUAL_EMBEDDINGS=True,
-                    LLM_ENABLED=True,
-                    LLM_API_KEY="key",
-                    LLM_BASE_URL="http://llm",
-                    LLM_MODEL_NAME="model",
+                    DEFAULT_LLM_API_KEY="key",
+                    DEFAULT_LLM_BASE_URL="http://llm",
+                    DEFAULT_LLM_MODEL_NAME="model",
                     CHUNK_SIZE=1000,
                 ),
             ),
@@ -583,10 +633,9 @@ class TestContextualText:
                 "src.utils.settings",
                 _fake_settings(
                     USE_CONTEXTUAL_EMBEDDINGS=True,
-                    LLM_ENABLED=True,
-                    LLM_API_KEY="key",
-                    LLM_BASE_URL="http://llm",
-                    LLM_MODEL_NAME="model",
+                    DEFAULT_LLM_API_KEY="key",
+                    DEFAULT_LLM_BASE_URL="http://llm",
+                    DEFAULT_LLM_MODEL_NAME="model",
                 ),
             ),
             patch("src.utils.AsyncOpenAI", return_value=mock_client),
@@ -602,10 +651,9 @@ class TestContextualText:
                 "src.utils.settings",
                 _fake_settings(
                     USE_CONTEXTUAL_EMBEDDINGS=True,
-                    LLM_ENABLED=True,
-                    LLM_API_KEY="key",
-                    LLM_BASE_URL="http://llm",
-                    LLM_MODEL_NAME="model",
+                    DEFAULT_LLM_API_KEY="key",
+                    DEFAULT_LLM_BASE_URL="http://llm",
+                    DEFAULT_LLM_MODEL_NAME="model",
                 ),
             ),
             patch("src.utils.AsyncOpenAI", side_effect=Exception("LLM down")),
@@ -669,7 +717,7 @@ class TestAddDocumentsToDb:
         with (
             patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
             patch("src.utils.upsert_source", return_value=1),
-            patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)),
+            patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, DEFAULT_LLM_MODEL_NAME=None)),
         ):
             result = await add_documents_to_db(
                 session,
@@ -688,7 +736,7 @@ class TestAddDocumentsToDb:
         with (
             patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
             patch("src.utils.upsert_source", return_value=1),
-            patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)),
+            patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, DEFAULT_LLM_MODEL_NAME=None)),
         ):
             result = await add_documents_to_db(
                 session, ["http://x.com/page"], ["some content"], [{"source": "x.com"}], [0]
@@ -709,7 +757,7 @@ class TestAddDocumentsToDb:
 
         with (
             patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
-            patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)),
+            patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, DEFAULT_LLM_MODEL_NAME=None)),
         ):
             result = await add_documents_to_db(session, ["url"], ["content"], [{}], [0])
         assert result == 1
@@ -760,10 +808,9 @@ class TestAddDocumentsToDb:
                 "src.utils.settings",
                 _fake_settings(
                     USE_CONTEXTUAL_EMBEDDINGS=True,
-                    LLM_ENABLED=True,
-                    LLM_API_KEY="k",
-                    LLM_BASE_URL="u",
-                    LLM_MODEL_NAME="m",
+                    DEFAULT_LLM_API_KEY="k",
+                    DEFAULT_LLM_BASE_URL="u",
+                    DEFAULT_LLM_MODEL_NAME="m",
                 ),
             ),
         ):
@@ -836,7 +883,7 @@ class TestAddDocumentsToDb:
         with (
             patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
             patch("src.utils.upsert_source", return_value=1),
-            patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)),
+            patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, DEFAULT_LLM_MODEL_NAME=None)),
         ):
             result = await add_documents_to_db(
                 session,
@@ -871,7 +918,7 @@ class TestAddDocumentsToDb:
         with (
             patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
             patch("src.utils.upsert_source", return_value=1),
-            patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)),
+            patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, DEFAULT_LLM_MODEL_NAME=None)),
         ):
             result = await add_documents_to_db(
                 session,
@@ -903,7 +950,7 @@ class TestAddDocumentsToDb:
 
         with (
             patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
-            patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)),
+            patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, DEFAULT_LLM_MODEL_NAME=None)),
         ):
             result = await add_documents_to_db(
                 session,
@@ -1369,7 +1416,7 @@ class TestAddDocumentsExtraCoverage:
         with (
             patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
             patch("src.utils.upsert_source", return_value=1),
-            patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)),
+            patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, DEFAULT_LLM_MODEL_NAME=None)),
         ):
             result = await add_documents_to_db(session, ["url"], ["content"], [{"source": "x"}], [0])
         assert result == 1
@@ -1732,7 +1779,10 @@ class TestSearchDocumentsCore:
             with (
                 patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
                 patch("src.utils.upsert_source", return_value=1),
-                patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)),
+                patch(
+                    "src.utils.settings",
+                    _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, DEFAULT_LLM_MODEL_NAME=None),
+                ),
             ):
                 result = await add_documents_to_db(
                     session,
@@ -1770,7 +1820,10 @@ class TestSearchDocumentsCore:
             with (
                 patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
                 patch("src.utils.upsert_source", return_value=1),
-                patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)),
+                patch(
+                    "src.utils.settings",
+                    _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, DEFAULT_LLM_MODEL_NAME=None),
+                ),
             ):
                 result = await add_documents_to_db(
                     session,
@@ -1806,7 +1859,10 @@ class TestSearchDocumentsCore:
             with (
                 patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
                 patch("src.utils.upsert_source", return_value=1),
-                patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, LLM_ENABLED=False)),
+                patch(
+                    "src.utils.settings",
+                    _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, DEFAULT_LLM_MODEL_NAME=None),
+                ),
             ):
                 # Error in delete means rollback; subsequent execution uses empty first_seen_map
                 # The function still attempts insert (delete error is non-fatal)
@@ -1950,12 +2006,12 @@ class TestExtractRecordSource:
 
 
 class TestRequestContextualSummary:
-    """L509-510: early return when LLM_MODEL_NAME is falsy."""
+    """Early return when effective contextual model name is falsy."""
 
     @pytest.mark.asyncio
     async def test_no_llm_model_name_returns_empty_string(self):
         with patch("src.utils.settings") as mock_settings:
-            mock_settings.LLM_MODEL_NAME = ""
+            mock_settings.effective_contextual_model_name = ""
             result = await _request_contextual_summary("doc", "chunk")
         assert result == ""
 

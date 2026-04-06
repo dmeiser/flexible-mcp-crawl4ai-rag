@@ -25,6 +25,7 @@ import sys
 from dataclasses import dataclass
 from typing import List, Optional
 
+import pytest
 from fastmcp import Client
 
 # ---------------------------------------------------------------------------
@@ -51,15 +52,39 @@ CODE_MD = "# Code Example\n\n```python\ndef hello_world():\n    return 'Hello, W
 # Shared state
 # ---------------------------------------------------------------------------
 
+_PYTEST_FIRST_CHUNK_ID: Optional[int] = None
+
 
 @dataclass
 class TestContext:
     """State shared across test functions within a single run."""
 
+    __test__ = False
+
     client: Client
     tool_names: List[str]
     # Populated by test_index_markdown; used by test_get_document_by_id_round_trip.
     first_chunk_id: Optional[int] = None
+
+
+# Pytest mode support (while preserving script mode below).
+pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture
+async def ctx() -> TestContext:
+    """Pytest fixture for integration smoke tests against a live MCP endpoint.
+
+    Skips the suite when the endpoint is unavailable rather than failing fixture
+    setup with connection errors.
+    """
+    try:
+        async with Client(MCP_URL, timeout=120) as client:
+            tools = await client.list_tools()
+            tool_names = [t.name for t in tools]
+            yield TestContext(client=client, tool_names=tool_names, first_chunk_id=_PYTEST_FIRST_CHUNK_ID)
+    except Exception as exc:
+        pytest.skip(f"Integration smoke tests require a live MCP server at {MCP_URL}: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +630,8 @@ async def test_index_markdown(ctx: TestContext) -> None:
     first_id = data.get("first_chunk_id")
     assert first_id is not None and first_id > 0, f"Expected a positive integer first_chunk_id; got {first_id}"
     ctx.first_chunk_id = first_id
+    global _PYTEST_FIRST_CHUNK_ID
+    _PYTEST_FIRST_CHUNK_ID = first_id
 
 
 async def test_index_fit_markdown(ctx: TestContext) -> None:
@@ -866,22 +893,23 @@ async def test_search_freshness_controls(ctx: TestContext) -> None:
 
 async def test_get_document_by_id_round_trip(ctx: TestContext) -> None:
     """get_document_by_id must retrieve the exact document stored by test_index_markdown."""
-    assert ctx.first_chunk_id is not None, (
+    first_chunk_id = ctx.first_chunk_id or _PYTEST_FIRST_CHUNK_ID
+    assert first_chunk_id is not None, (
         "Cannot run round-trip test: test_index_markdown did not provide first_chunk_id"
     )
     data = json.loads(
         (
             await ctx.client.call_tool(
                 "get_document_by_id",
-                {"document_id": ctx.first_chunk_id},
+                {"document_id": first_chunk_id},
             )
         ).data
     )
-    assert data["success"], f"get_document_by_id({ctx.first_chunk_id}) returned failure: {data}"
+    assert data["success"], f"get_document_by_id({first_chunk_id}) returned failure: {data}"
     assert "document" in data, "Expected 'document' key in get_document_by_id response"
     doc = data["document"]
     assert doc["url"] == SMOKE_INDEX_URL, f"Expected url={SMOKE_INDEX_URL!r}, got {doc['url']!r}"
-    assert doc["id"] == ctx.first_chunk_id
+    assert doc["id"] == first_chunk_id
 
 
 async def test_get_markdown_by_url(ctx: TestContext) -> None:
