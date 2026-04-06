@@ -1,4 +1,4 @@
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 # flexible-mcp-crawl4ai-rag
 
@@ -130,6 +130,12 @@ Retrieval supports:
 ### Integration / e2e smoke
 - `MCP_URL=http://localhost:8051/sse uv run python tests/integration_smoke.py`
 - strict rollout: `EXPECT_NEW_TOOLS=true MCP_URL=http://localhost:8051/sse uv run python tests/integration_smoke.py`
+
+## Configuration
+
+Full reference for all environment variables, embedding providers, external database setup, Ollama model selection, chunking options, and RAG feature flags:
+
+- **[docs/configuration.md](docs/configuration.md)**
 
 ## Migration and cookbook
 
