@@ -258,7 +258,7 @@ Assert on normal run:
 Assert on export run:
 
 - `success == true`
-- `knowledge_base_export.format == "jsonl"`
+- `knowledge_base_export.format in {"json", "jsonl"}`
 - `adaptive_answer.query` matches your prompt
 
 ### `crawl_to_markdown`

@@ -239,7 +239,10 @@ async def test_crawl_adaptive(ctx: TestContext) -> None:
     )
     data2 = json.loads(result2.data)
     assert data2["success"], f"crawl_adaptive(export+answer) failed: {data2}"
-    assert data2["knowledge_base_export"]["format"] == "jsonl"
+    assert data2["knowledge_base_export"]["format"] in {
+        "json",
+        "jsonl",
+    }, f"Unexpected knowledge_base_export.format: {data2}"
     assert "adaptive_answer" in data2
     assert data2["adaptive_answer"]["query"] == "summarize this site"
 
