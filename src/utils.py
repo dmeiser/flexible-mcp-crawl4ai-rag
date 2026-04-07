@@ -83,14 +83,11 @@ class Settings(BaseSettings):
     EMBEDDING_DIM: int = 768
 
     # Provider-agnostic embedding settings (preferred)
-    EMBEDDING_API_URL: str = "http://localhost:11434/api/embeddings"
+    EMBEDDING_BASE_URL: Optional[str] = None
+    EMBEDDING_API_KEY: Optional[str] = None
     EMBEDDING_MODEL_NAME: Optional[str] = None
     EMBEDDING_MAX_RETRIES: int = 3
     EMBEDDING_RETRY_DELAY_SECONDS: float = 1.0
-
-    # OpenAI client settings (used when EMBEDDING_PROVIDER=openai)
-    OPENAI_API_KEY: Optional[str] = None
-    OPENAI_BASE_URL: Optional[str] = None  # Override for Ollama OpenAI-compat endpoint
 
     BATCH_SIZE: int = 50
 
@@ -152,8 +149,12 @@ class Settings(BaseSettings):
     # Computed effective configs (feature override → DEFAULT_LLM_* fallback)
     # ---------------------------------------------------------------------------
     @property
-    def effective_embedding_api_url(self) -> str:
-        return self.EMBEDDING_API_URL
+    def effective_embedding_base_url(self) -> Optional[str]:
+        return self.EMBEDDING_BASE_URL
+
+    @property
+    def effective_embedding_ollama_url(self) -> str:
+        return self.EMBEDDING_BASE_URL or "http://localhost:11434/api/embeddings"
 
     @property
     def effective_embedding_model_name(self) -> str:
@@ -237,8 +238,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def check_openai_config_if_selected(self) -> "Settings":
-        if self.EMBEDDING_PROVIDER == EmbeddingProvider.OPENAI and not self.OPENAI_API_KEY:
-            raise ValueError("OPENAI_API_KEY must be set when EMBEDDING_PROVIDER=openai.")
+        if self.EMBEDDING_PROVIDER == EmbeddingProvider.OPENAI and not self.EMBEDDING_API_KEY:
+            raise ValueError("EMBEDDING_API_KEY must be set when EMBEDDING_PROVIDER=openai.")
         return self
 
 
@@ -526,10 +527,10 @@ async def create_embedding(text: str) -> List[float]:
 async def _create_openai_embedding(text: str) -> List[float]:
     """Create embedding via OpenAI (or OpenAI-compatible) API."""
     client_kwargs: Dict[str, Any] = {
-        "api_key": _resolved_openai_api_key(settings.OPENAI_API_KEY, LLMProvider.OPENAI),
+        "api_key": _resolved_openai_api_key(settings.EMBEDDING_API_KEY, LLMProvider.OPENAI),
     }
-    if settings.OPENAI_BASE_URL:
-        client_kwargs["base_url"] = settings.OPENAI_BASE_URL
+    if settings.effective_embedding_base_url:
+        client_kwargs["base_url"] = settings.effective_embedding_base_url
 
     client = AsyncOpenAI(**client_kwargs)
     try:
@@ -561,7 +562,7 @@ async def _create_ollama_embedding(text: str, attempt: int = 1) -> List[float]:
 
 async def _request_ollama_embedding(client: httpx.AsyncClient, text: str) -> List[float]:
     resp = await client.post(
-        settings.effective_embedding_api_url,
+        settings.effective_embedding_ollama_url,
         json={"model": settings.effective_embedding_model_name, "prompt": text},
     )
     resp.raise_for_status()

@@ -181,7 +181,7 @@ Or comment out / remove the `ollama` service from `docker-compose.yml` for a per
 2. Update `.env` with the new model name and its vector dimension:
 
    ```env
-   OLLAMA_EMBED_MODEL=mxbai-embed-large
+   EMBEDDING_MODEL_NAME=mxbai-embed-large
    EMBEDDING_DIM=1024
    ```
 
@@ -205,12 +205,13 @@ Or comment out / remove the `ollama` service from `docker-compose.yml` for a per
 
 ```env
 EMBEDDING_PROVIDER=openai
-OPENAI_API_KEY=sk-...
-OPENAI_EMBED_MODEL=text-embedding-3-small
+EMBEDDING_API_KEY=sk-...
+EMBEDDING_MODEL_NAME=text-embedding-3-small
+EMBEDDING_BASE_URL=https://api.openai.com/v1
 EMBEDDING_DIM=1536
 ```
 
-`OPENAI_API_KEY` is validated at startup when `EMBEDDING_PROVIDER=openai`. `EMBEDDING_DIM` must match the model output dimension:
+`EMBEDDING_API_KEY` is validated at startup when `EMBEDDING_PROVIDER=openai`. `EMBEDDING_DIM` must match the model output dimension:
 
 | Model | Dimension |
 |---|---|
@@ -224,13 +225,13 @@ Ollama exposes an OpenAI-compatible endpoint at `/v1` alongside the native `/api
 
 ```env
 EMBEDDING_PROVIDER=openai
-OPENAI_API_KEY=ollama          # Ollama ignores the key; any non-empty value works
-OPENAI_EMBED_MODEL=nomic-embed-text
-OPENAI_BASE_URL=http://localhost:11434/v1
+EMBEDDING_API_KEY=ollama          # Ollama ignores the key; any non-empty value works
+EMBEDDING_MODEL_NAME=nomic-embed-text
+EMBEDDING_BASE_URL=http://localhost:11434/v1
 EMBEDDING_DIM=768
 ```
 
-`OPENAI_BASE_URL` overrides the base URL used by the `openai` Python client, so any OpenAI-compatible server (LM Studio, vLLM, Azure OpenAI, etc.) works the same way.
+`EMBEDDING_BASE_URL` overrides the base URL used by the `openai` Python client, so any OpenAI-compatible server (LM Studio, vLLM, Azure OpenAI, etc.) works the same way.
 
 ---
 

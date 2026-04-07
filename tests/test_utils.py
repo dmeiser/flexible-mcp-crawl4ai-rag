@@ -9,7 +9,7 @@ import pytest
 
 os.environ.setdefault("POSTGRES_URL", "postgresql://u:p@localhost:5432/testdb")
 os.environ.setdefault("EMBEDDING_PROVIDER", "ollama")
-os.environ.setdefault("EMBEDDING_API_URL", "http://localhost:11434/api/embeddings")
+os.environ.setdefault("EMBEDDING_BASE_URL", "http://localhost:11434/api/embeddings")
 os.environ.setdefault("EMBEDDING_MODEL_NAME", "nomic-embed-text")
 os.environ.setdefault("EMBEDDING_DIM", "4")
 os.environ.setdefault("EMBEDDING_MAX_RETRIES", "2")
@@ -81,12 +81,11 @@ def _fake_settings(**kw):
         POSTGRES_URL="postgresql://u:p@localhost:5432/testdb",
         EMBEDDING_PROVIDER=EmbeddingProvider.OLLAMA,
         EMBEDDING_DIM=DIM,
-        EMBEDDING_API_URL="http://localhost:11434/api/embeddings",
+        EMBEDDING_BASE_URL="http://localhost:11434/api/embeddings",
         EMBEDDING_MODEL_NAME="nomic-embed-text",
         EMBEDDING_MAX_RETRIES=2,
         EMBEDDING_RETRY_DELAY_SECONDS=0.001,
-        OPENAI_API_KEY=None,
-        OPENAI_BASE_URL=None,
+        EMBEDDING_API_KEY=None,
         BATCH_SIZE=10,
         CHUNK_SIZE=100,
         CHUNK_OVERLAP=10,
@@ -133,7 +132,8 @@ def _fake_settings(**kw):
         effective_rerank_api_key=None,
         effective_rerank_base_url=None,
         effective_rerank_model_name="cross-encoder/ms-marco-MiniLM-L-6-v2",
-        effective_embedding_api_url="http://localhost:11434/api/embeddings",
+        effective_embedding_base_url="http://localhost:11434/api/embeddings",
+        effective_embedding_ollama_url="http://localhost:11434/api/embeddings",
         effective_embedding_model_name="nomic-embed-text",
         effective_embedding_max_retries=2,
         effective_embedding_retry_delay_seconds=0.001,
@@ -175,7 +175,10 @@ def _fake_settings(**kw):
         or defaults.get("DEFAULT_LLM_MODEL_NAME")
         or "cross-encoder/ms-marco-MiniLM-L-6-v2"
     )
-    defaults["effective_embedding_api_url"] = defaults.get("EMBEDDING_API_URL")
+    defaults["effective_embedding_base_url"] = defaults.get("EMBEDDING_BASE_URL")
+    defaults["effective_embedding_ollama_url"] = (
+        defaults.get("EMBEDDING_BASE_URL") or "http://localhost:11434/api/embeddings"
+    )
     defaults["effective_embedding_model_name"] = defaults.get("EMBEDDING_MODEL_NAME") or (
         "text-embedding-3-small"
         if defaults.get("EMBEDDING_PROVIDER") == EmbeddingProvider.OPENAI
@@ -227,7 +230,7 @@ class TestSettingsValidation:
         s = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
             EMBEDDING_PROVIDER="ollama",
-            EMBEDDING_API_URL="http://localhost:11434/api/embeddings",
+            EMBEDDING_BASE_URL="http://localhost:11434/api/embeddings",
             EMBEDDING_MODEL_NAME="m",
             DEFAULT_LLM_API_KEY=None,
             DEFAULT_LLM_BASE_URL=None,
@@ -239,7 +242,7 @@ class TestSettingsValidation:
         s = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
             EMBEDDING_PROVIDER="ollama",
-            EMBEDDING_API_URL="http://localhost:11434/api/embeddings",
+            EMBEDDING_BASE_URL="http://localhost:11434/api/embeddings",
             EMBEDDING_MODEL_NAME="m",
             DEFAULT_LLM_API_KEY="key",
             DEFAULT_LLM_BASE_URL="http://llm",
@@ -253,7 +256,7 @@ class TestSettingsValidation:
         s = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
             EMBEDDING_PROVIDER="ollama",
-            EMBEDDING_API_URL="http://localhost:11434/api/embeddings",
+            EMBEDDING_BASE_URL="http://localhost:11434/api/embeddings",
             EMBEDDING_MODEL_NAME="m",
             DEFAULT_LLM_MODEL_NAME="default-model",
             CONTEXTUAL_LLM_MODEL_NAME="ctx-model",
@@ -261,23 +264,22 @@ class TestSettingsValidation:
         assert s.effective_contextual_model_name == "ctx-model"
 
     def test_openai_missing_key_raises(self):
-        with pytest.raises(Exception, match="OPENAI_API_KEY"):
+        with pytest.raises(Exception, match="EMBEDDING_API_KEY"):
             Settings(
                 POSTGRES_URL="postgresql://u:p@h/db",
                 EMBEDDING_PROVIDER="openai",
-                OPENAI_API_KEY=None,
-                EMBEDDING_API_URL="http://localhost:11434/api/embeddings",
+                EMBEDDING_API_KEY=None,
+                EMBEDDING_BASE_URL="http://localhost:11434/api/embeddings",
                 EMBEDDING_MODEL_NAME="m",
             )
 
     def test_openai_missing_key_with_base_url_still_raises(self):
-        with pytest.raises(Exception, match="OPENAI_API_KEY"):
+        with pytest.raises(Exception, match="EMBEDDING_API_KEY"):
             Settings(
                 POSTGRES_URL="postgresql://u:p@h/db",
                 EMBEDDING_PROVIDER="openai",
-                OPENAI_API_KEY=None,
-                OPENAI_BASE_URL="http://ollama:11434/v1",
-                EMBEDDING_API_URL="http://localhost:11434/api/embeddings",
+                EMBEDDING_API_KEY=None,
+                EMBEDDING_BASE_URL="http://ollama:11434/v1",
                 EMBEDDING_MODEL_NAME="m",
             )
 
@@ -285,7 +287,7 @@ class TestSettingsValidation:
         s = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
             EMBEDDING_PROVIDER="ollama",
-            EMBEDDING_API_URL="http://localhost:11434/api/embeddings",
+            EMBEDDING_BASE_URL="http://localhost:11434/api/embeddings",
             EMBEDDING_MODEL_NAME="m",
         )
         assert s.EMBEDDING_PROVIDER == EmbeddingProvider.OLLAMA
@@ -294,7 +296,7 @@ class TestSettingsValidation:
         s = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
             EMBEDDING_PROVIDER="ollama",
-            EMBEDDING_API_URL="http://localhost:11434/api/embeddings",
+            EMBEDDING_BASE_URL="http://localhost:11434/api/embeddings",
             EMBEDDING_MODEL_NAME="m",
             DEFAULT_LLM_BASE_URL="http://default-llm",
             DEFAULT_LLM_API_KEY="default-key",
@@ -308,7 +310,7 @@ class TestSettingsValidation:
         with_default = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
             EMBEDDING_PROVIDER="ollama",
-            EMBEDDING_API_URL="http://localhost:11434/api/embeddings",
+            EMBEDDING_BASE_URL="http://localhost:11434/api/embeddings",
             EMBEDDING_MODEL_NAME="m",
             DEFAULT_LLM_MODEL_NAME="default-rerank-model",
             RERANK_LLM_MODEL_NAME="",
@@ -318,7 +320,7 @@ class TestSettingsValidation:
         with_builtin = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
             EMBEDDING_PROVIDER="ollama",
-            EMBEDDING_API_URL="http://localhost:11434/api/embeddings",
+            EMBEDDING_BASE_URL="http://localhost:11434/api/embeddings",
             EMBEDDING_MODEL_NAME="m",
             DEFAULT_LLM_MODEL_NAME="",
             RERANK_LLM_MODEL_NAME="",
@@ -329,12 +331,13 @@ class TestSettingsValidation:
         s = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
             EMBEDDING_PROVIDER="ollama",
-            EMBEDDING_API_URL="http://ollama:11434/api/embeddings",
+            EMBEDDING_BASE_URL="http://ollama:11434/api/embeddings",
             EMBEDDING_MODEL_NAME="nomic-embed-text",
             EMBEDDING_MAX_RETRIES=7,
             EMBEDDING_RETRY_DELAY_SECONDS=0.25,
         )
-        assert s.effective_embedding_api_url == "http://ollama:11434/api/embeddings"
+        assert s.effective_embedding_base_url == "http://ollama:11434/api/embeddings"
+        assert s.effective_embedding_ollama_url == "http://ollama:11434/api/embeddings"
         assert s.effective_embedding_model_name == "nomic-embed-text"
         assert s.effective_embedding_max_retries == 7
         assert s.effective_embedding_retry_delay_seconds == pytest.approx(0.25)
@@ -343,7 +346,7 @@ class TestSettingsValidation:
         s = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
             EMBEDDING_PROVIDER="openai",
-            OPENAI_API_KEY="sk-test",
+            EMBEDDING_API_KEY="sk-test",
             EMBEDDING_MODEL_NAME=None,
         )
         assert s.effective_embedding_model_name == "text-embedding-3-small"
@@ -450,7 +453,7 @@ class TestCreateEmbedding:
                 "src.utils.settings",
                 _fake_settings(
                     EMBEDDING_PROVIDER=EmbeddingProvider.OPENAI,
-                    OPENAI_API_KEY="sk-test",
+                    EMBEDDING_API_KEY="sk-test",
                 ),
             ),
             patch("src.utils._create_openai_embedding", new_callable=AsyncMock, return_value=EMBED_A) as mock_oa,
@@ -635,9 +638,9 @@ class TestOpenAIEmbedding:
                 "src.utils.settings",
                 _fake_settings(
                     EMBEDDING_PROVIDER=EmbeddingProvider.OPENAI,
-                    OPENAI_API_KEY="sk-test",
+                    EMBEDDING_API_KEY="sk-test",
                     EMBEDDING_MODEL_NAME="text-embedding-3-small",
-                    OPENAI_BASE_URL=None,
+                    EMBEDDING_BASE_URL=None,
                 ),
             ),
             patch("src.utils.AsyncOpenAI", return_value=mock_client),
@@ -658,8 +661,8 @@ class TestOpenAIEmbedding:
                 "src.utils.settings",
                 _fake_settings(
                     EMBEDDING_PROVIDER=EmbeddingProvider.OPENAI,
-                    OPENAI_API_KEY="sk-test",
-                    OPENAI_BASE_URL="http://custom:11434",
+                    EMBEDDING_API_KEY="sk-test",
+                    EMBEDDING_BASE_URL="http://custom:11434",
                 ),
             ),
             patch("src.utils.AsyncOpenAI", return_value=mock_client) as MockOA,
@@ -681,8 +684,8 @@ class TestOpenAIEmbedding:
                 "src.utils.settings",
                 _fake_settings(
                     EMBEDDING_PROVIDER=EmbeddingProvider.OPENAI,
-                    OPENAI_API_KEY=None,
-                    OPENAI_BASE_URL="http://ollama:11434/v1",
+                    EMBEDDING_API_KEY=None,
+                    EMBEDDING_BASE_URL="http://ollama:11434/v1",
                 ),
             ),
             patch("src.utils.AsyncOpenAI", return_value=mock_client) as MockOA,
@@ -703,7 +706,7 @@ class TestOpenAIEmbedding:
                 "src.utils.settings",
                 _fake_settings(
                     EMBEDDING_PROVIDER=EmbeddingProvider.OPENAI,
-                    OPENAI_API_KEY="sk-test",
+                    EMBEDDING_API_KEY="sk-test",
                 ),
             ),
             patch("src.utils.AsyncOpenAI", return_value=mock_client),
