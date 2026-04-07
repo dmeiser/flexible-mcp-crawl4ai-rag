@@ -15,7 +15,7 @@ from typing import Any, Dict, Generator, List, Optional, Sequence, Tuple, cast
 
 import httpx
 import numpy as np
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, OpenAI
 from pgvector.sqlalchemy import Vector
 from pydantic import PostgresDsn, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -53,6 +53,11 @@ class EmbeddingProvider(str, Enum):
     OLLAMA = "ollama"
 
 
+class LLMProvider(str, Enum):
+    OPENAI = "openai"
+    OLLAMA = "ollama"
+
+
 class ContentClass(str, Enum):
     TEXT = "text"
     CODE = "code"
@@ -77,15 +82,14 @@ class Settings(BaseSettings):
     EMBEDDING_PROVIDER: EmbeddingProvider = EmbeddingProvider.OLLAMA
     EMBEDDING_DIM: int = 768
 
-    # Ollama settings (used when EMBEDDING_PROVIDER=ollama)
-    OLLAMA_API_URL: str = "http://localhost:11434/api/embeddings"
-    OLLAMA_EMBED_MODEL: str = "nomic-embed-text"
-    OLLAMA_MAX_RETRIES: int = 3
-    OLLAMA_RETRY_DELAY_SECONDS: float = 1.0
+    # Provider-agnostic embedding settings (preferred)
+    EMBEDDING_API_URL: str = "http://localhost:11434/api/embeddings"
+    EMBEDDING_MODEL_NAME: Optional[str] = None
+    EMBEDDING_MAX_RETRIES: int = 3
+    EMBEDDING_RETRY_DELAY_SECONDS: float = 1.0
 
-    # OpenAI settings (used when EMBEDDING_PROVIDER=openai)
+    # OpenAI client settings (used when EMBEDDING_PROVIDER=openai)
     OPENAI_API_KEY: Optional[str] = None
-    OPENAI_EMBED_MODEL: str = "text-embedding-3-small"
     OPENAI_BASE_URL: Optional[str] = None  # Override for Ollama OpenAI-compat endpoint
 
     BATCH_SIZE: int = 50
@@ -108,6 +112,7 @@ class Settings(BaseSettings):
     # Default LLM — shared fallback for all LLM-powered features below.
     # If a feature-specific override is not set it falls back to these values.
     # ---------------------------------------------------------------------------
+    DEFAULT_LLM_PROVIDER: LLMProvider = LLMProvider.OPENAI
     DEFAULT_LLM_BASE_URL: Optional[str] = None
     DEFAULT_LLM_API_KEY: Optional[str] = None
     DEFAULT_LLM_MODEL_NAME: Optional[str] = None
@@ -116,16 +121,19 @@ class Settings(BaseSettings):
     # A feature's LLM is considered active when its effective model name is set.
 
     # 1. Contextual embeddings (requires USE_CONTEXTUAL_EMBEDDINGS=true)
+    CONTEXTUAL_LLM_PROVIDER: Optional[LLMProvider] = None
     CONTEXTUAL_LLM_BASE_URL: Optional[str] = None
     CONTEXTUAL_LLM_API_KEY: Optional[str] = None
     CONTEXTUAL_LLM_MODEL_NAME: Optional[str] = None
 
     # 2. Hybrid search
+    HYBRID_LLM_PROVIDER: Optional[LLMProvider] = None
     HYBRID_LLM_BASE_URL: Optional[str] = None
     HYBRID_LLM_API_KEY: Optional[str] = None
     HYBRID_LLM_MODEL_NAME: Optional[str] = None
 
     # 3. Agentic RAG (requires USE_AGENTIC_RAG=true)
+    AGENTIC_LLM_PROVIDER: Optional[LLMProvider] = None
     AGENTIC_LLM_BASE_URL: Optional[str] = None
     AGENTIC_LLM_API_KEY: Optional[str] = None
     AGENTIC_LLM_MODEL_NAME: Optional[str] = None
@@ -133,6 +141,7 @@ class Settings(BaseSettings):
     # 4. Reranking (requires USE_RERANKING=true)
     #    RERANK_LLM_MODEL_NAME also doubles as the local CrossEncoder model name
     #    when no BASE_URL is configured.
+    RERANK_LLM_PROVIDER: Optional[LLMProvider] = None
     RERANK_LLM_BASE_URL: Optional[str] = None
     RERANK_LLM_API_KEY: Optional[str] = None
     RERANK_LLM_MODEL_NAME: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
@@ -143,8 +152,32 @@ class Settings(BaseSettings):
     # Computed effective configs (feature override → DEFAULT_LLM_* fallback)
     # ---------------------------------------------------------------------------
     @property
+    def effective_embedding_api_url(self) -> str:
+        return self.EMBEDDING_API_URL
+
+    @property
+    def effective_embedding_model_name(self) -> str:
+        if self.EMBEDDING_MODEL_NAME:
+            return self.EMBEDDING_MODEL_NAME
+        if self.EMBEDDING_PROVIDER == EmbeddingProvider.OPENAI:
+            return "text-embedding-3-small"
+        return "nomic-embed-text"
+
+    @property
+    def effective_embedding_max_retries(self) -> int:
+        return int(self.EMBEDDING_MAX_RETRIES)
+
+    @property
+    def effective_embedding_retry_delay_seconds(self) -> float:
+        return float(self.EMBEDDING_RETRY_DELAY_SECONDS)
+
+    @property
     def effective_contextual_base_url(self) -> Optional[str]:
         return self.CONTEXTUAL_LLM_BASE_URL or self.DEFAULT_LLM_BASE_URL
+
+    @property
+    def effective_contextual_provider(self) -> LLMProvider:
+        return self.CONTEXTUAL_LLM_PROVIDER or self.DEFAULT_LLM_PROVIDER
 
     @property
     def effective_contextual_api_key(self) -> Optional[str]:
@@ -159,6 +192,10 @@ class Settings(BaseSettings):
         return self.HYBRID_LLM_BASE_URL or self.DEFAULT_LLM_BASE_URL
 
     @property
+    def effective_hybrid_provider(self) -> LLMProvider:
+        return self.HYBRID_LLM_PROVIDER or self.DEFAULT_LLM_PROVIDER
+
+    @property
     def effective_hybrid_api_key(self) -> Optional[str]:
         return self.HYBRID_LLM_API_KEY or self.DEFAULT_LLM_API_KEY
 
@@ -171,6 +208,10 @@ class Settings(BaseSettings):
         return self.AGENTIC_LLM_BASE_URL or self.DEFAULT_LLM_BASE_URL
 
     @property
+    def effective_agentic_provider(self) -> LLMProvider:
+        return self.AGENTIC_LLM_PROVIDER or self.DEFAULT_LLM_PROVIDER
+
+    @property
     def effective_agentic_api_key(self) -> Optional[str]:
         return self.AGENTIC_LLM_API_KEY or self.DEFAULT_LLM_API_KEY
 
@@ -181,6 +222,10 @@ class Settings(BaseSettings):
     @property
     def effective_rerank_base_url(self) -> Optional[str]:
         return self.RERANK_LLM_BASE_URL or self.DEFAULT_LLM_BASE_URL
+
+    @property
+    def effective_rerank_provider(self) -> LLMProvider:
+        return self.RERANK_LLM_PROVIDER or self.DEFAULT_LLM_PROVIDER
 
     @property
     def effective_rerank_api_key(self) -> Optional[str]:
@@ -480,14 +525,16 @@ async def create_embedding(text: str) -> List[float]:
 
 async def _create_openai_embedding(text: str) -> List[float]:
     """Create embedding via OpenAI (or OpenAI-compatible) API."""
-    client_kwargs: Dict[str, Any] = {"api_key": settings.OPENAI_API_KEY}
+    client_kwargs: Dict[str, Any] = {
+        "api_key": _resolved_openai_api_key(settings.OPENAI_API_KEY, LLMProvider.OPENAI),
+    }
     if settings.OPENAI_BASE_URL:
         client_kwargs["base_url"] = settings.OPENAI_BASE_URL
 
     client = AsyncOpenAI(**client_kwargs)
     try:
         resp = await client.embeddings.create(
-            model=settings.OPENAI_EMBED_MODEL,
+            model=settings.effective_embedding_model_name,
             input=text,
         )
         return _normalize(resp.data[0].embedding)
@@ -500,7 +547,7 @@ async def _create_openai_embedding(text: str) -> List[float]:
 async def _create_ollama_embedding(text: str, attempt: int = 1) -> List[float]:
     """Create embedding via Ollama REST API with retry logic."""
     async with httpx.AsyncClient(timeout=60) as client:
-        for attempt in range(1, settings.OLLAMA_MAX_RETRIES + 1):
+        for attempt in range(1, settings.effective_embedding_max_retries + 1):
             try:
                 return await _request_ollama_embedding(client, text)
             except (httpx.TimeoutException, httpx.ConnectError) as exc:
@@ -514,8 +561,8 @@ async def _create_ollama_embedding(text: str, attempt: int = 1) -> List[float]:
 
 async def _request_ollama_embedding(client: httpx.AsyncClient, text: str) -> List[float]:
     resp = await client.post(
-        settings.OLLAMA_API_URL,
-        json={"model": settings.OLLAMA_EMBED_MODEL, "prompt": text},
+        settings.effective_embedding_api_url,
+        json={"model": settings.effective_embedding_model_name, "prompt": text},
     )
     resp.raise_for_status()
     embedding = resp.json().get("embedding")
@@ -525,9 +572,11 @@ async def _request_ollama_embedding(client: httpx.AsyncClient, text: str) -> Lis
 
 
 async def _handle_ollama_retry_or_raise(attempt: int, exc: Exception) -> None:
-    if attempt >= settings.OLLAMA_MAX_RETRIES:
-        raise EmbeddingError(f"Ollama request failed after {settings.OLLAMA_MAX_RETRIES} attempts: {exc}") from exc
-    delay = settings.OLLAMA_RETRY_DELAY_SECONDS * (2 ** (attempt - 1))
+    if attempt >= settings.effective_embedding_max_retries:
+        raise EmbeddingError(
+            f"Ollama request failed after {settings.effective_embedding_max_retries} attempts: {exc}"
+        ) from exc
+    delay = settings.effective_embedding_retry_delay_seconds * (2 ** (attempt - 1))
     await asyncio.sleep(delay)
 
 
@@ -578,7 +627,10 @@ async def _request_contextual_summary(full_document: str, chunk: str) -> str:
         )
         return ""
 
-    client = AsyncOpenAI(api_key=settings.effective_contextual_api_key, base_url=settings.effective_contextual_base_url)
+    client = AsyncOpenAI(
+        api_key=_resolved_openai_api_key(settings.effective_contextual_api_key, settings.effective_contextual_provider),
+        base_url=settings.effective_contextual_base_url,
+    )
     try:
         resp = await client.chat.completions.create(
             model=settings.effective_contextual_model_name,
@@ -1386,10 +1438,109 @@ def rerank_results(
         return results[:top_k]
 
     try:
+        if settings.effective_rerank_base_url:
+            return _rerank_with_openai_compatible_api(query, results, top_k)
         return _rerank_with_cross_encoder(query, results, top_k)
     except Exception as exc:
         logger.warning(f"Reranking failed, returning original order: {exc}")
         return results[:top_k]
+
+
+def _resolved_openai_api_key(api_key: Optional[str], provider: LLMProvider) -> Optional[str]:
+    if isinstance(api_key, str) and api_key.strip():
+        return api_key
+    if provider == LLMProvider.OLLAMA:
+        return "ollama"
+    return api_key
+
+
+def _rerank_with_openai_compatible_api(
+    query: str,
+    results: List[Dict[str, Any]],
+    top_k: int,
+) -> List[Dict[str, Any]]:
+    client = OpenAI(
+        api_key=_resolved_openai_api_key(settings.effective_rerank_api_key, settings.effective_rerank_provider),
+        base_url=settings.effective_rerank_base_url,
+    )
+    try:
+        response = client.chat.completions.create(
+            model=settings.effective_rerank_model_name,
+            messages=cast(Any, _rerank_messages(query, results)),
+            temperature=0,
+        )
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+
+    scores = _parse_rerank_scores(response, expected_count=len(results))
+    if scores is None:
+        raise ValueError("Invalid rerank API response format")
+    return _apply_rerank_scores(results, scores, top_k)
+
+
+def _rerank_messages(query: str, results: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    candidates = [
+        {
+            "index": idx,
+            "content": str(result.get("content", ""))[:3000],
+        }
+        for idx, result in enumerate(results)
+    ]
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are a relevance ranker. Return strict JSON only in the format "
+                '{"scores": [float, ...]} with one score per candidate index in order. '
+                "Higher score means more relevant to the query."
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps({"query": query, "candidates": candidates}, ensure_ascii=False),
+        },
+    ]
+
+
+def _parse_rerank_scores(response: Any, expected_count: int) -> Optional[List[float]]:
+    content = _rerank_response_content(response)
+    if content is None:
+        return None
+    payload = _rerank_json_payload(content)
+    scores = _rerank_score_values(payload, expected_count)
+    if scores is None:
+        return None
+    return [float(score) for score in scores]
+
+
+def _rerank_response_content(response: Any) -> Optional[str]:
+    content = response.choices[0].message.content
+    return content if isinstance(content, str) else None
+
+
+def _rerank_json_payload(content: str) -> Optional[Dict[str, Any]]:
+    try:
+        payload = json.loads(content)
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _rerank_score_values(payload: Optional[Dict[str, Any]], expected_count: int) -> Optional[List[Any]]:
+    if payload is None:
+        return None
+    scores = payload.get("scores")
+    if not isinstance(scores, list) or len(scores) != expected_count:
+        return None
+    return scores
+
+
+def _apply_rerank_scores(results: List[Dict[str, Any]], scores: List[float], top_k: int) -> List[Dict[str, Any]]:
+    for index, result in enumerate(results):
+        result["rerank_score"] = float(scores[index])
+    return sorted(results, key=lambda item: item.get("rerank_score", 0), reverse=True)[:top_k]
 
 
 def _rerank_with_cross_encoder(

@@ -9,11 +9,11 @@ import pytest
 
 os.environ.setdefault("POSTGRES_URL", "postgresql://u:p@localhost:5432/testdb")
 os.environ.setdefault("EMBEDDING_PROVIDER", "ollama")
-os.environ.setdefault("OLLAMA_API_URL", "http://localhost:11434/api/embeddings")
-os.environ.setdefault("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+os.environ.setdefault("EMBEDDING_API_URL", "http://localhost:11434/api/embeddings")
+os.environ.setdefault("EMBEDDING_MODEL_NAME", "nomic-embed-text")
 os.environ.setdefault("EMBEDDING_DIM", "4")
-os.environ.setdefault("OLLAMA_MAX_RETRIES", "2")
-os.environ.setdefault("OLLAMA_RETRY_DELAY_SECONDS", "0.01")
+os.environ.setdefault("EMBEDDING_MAX_RETRIES", "2")
+os.environ.setdefault("EMBEDDING_RETRY_DELAY_SECONDS", "0.01")
 os.environ.setdefault("BATCH_SIZE", "10")
 os.environ.setdefault("DEFAULT_LLM_MODEL_NAME", "")
 os.environ.setdefault("USE_CONTEXTUAL_EMBEDDINGS", "false")
@@ -25,6 +25,7 @@ from src.utils import (
     ChunkStrategy,
     EmbeddingError,
     EmbeddingProvider,
+    LLMProvider,
     OllamaError,
     Settings,
     _code_example_row_to_result,
@@ -36,11 +37,15 @@ from src.utils import (
     _normalize,
     _normalize_source_change_id,
     _parse_iso_datetime,
+    _parse_rerank_scores,
     _python_side_vector_search,
     _query_code_example_rows,
     _request_contextual_summary,
+    _rerank_json_payload,
+    _rerank_score_values,
     _resolve_content_hash,
     _resolve_link_references,
+    _resolved_openai_api_key,
     add_code_examples_to_db,
     add_documents_to_db,
     compute_staleness_score,
@@ -76,12 +81,11 @@ def _fake_settings(**kw):
         POSTGRES_URL="postgresql://u:p@localhost:5432/testdb",
         EMBEDDING_PROVIDER=EmbeddingProvider.OLLAMA,
         EMBEDDING_DIM=DIM,
-        OLLAMA_API_URL="http://localhost:11434/api/embeddings",
-        OLLAMA_EMBED_MODEL="nomic-embed-text",
-        OLLAMA_MAX_RETRIES=2,
-        OLLAMA_RETRY_DELAY_SECONDS=0.001,
+        EMBEDDING_API_URL="http://localhost:11434/api/embeddings",
+        EMBEDDING_MODEL_NAME="nomic-embed-text",
+        EMBEDDING_MAX_RETRIES=2,
+        EMBEDDING_RETRY_DELAY_SECONDS=0.001,
         OPENAI_API_KEY=None,
-        OPENAI_EMBED_MODEL="text-embedding-3-small",
         OPENAI_BASE_URL=None,
         BATCH_SIZE=10,
         CHUNK_SIZE=100,
@@ -93,37 +97,53 @@ def _fake_settings(**kw):
         USE_RERANKING=False,
         MARKDOWN_INDEX_POLICY="both-by-default",
         MARKDOWN_FALLBACK_ENABLED=True,
+        DEFAULT_LLM_PROVIDER=LLMProvider.OPENAI,
         DEFAULT_LLM_API_KEY=None,
         DEFAULT_LLM_BASE_URL=None,
         DEFAULT_LLM_MODEL_NAME=None,
+        CONTEXTUAL_LLM_PROVIDER=None,
         CONTEXTUAL_LLM_API_KEY=None,
         CONTEXTUAL_LLM_BASE_URL=None,
         CONTEXTUAL_LLM_MODEL_NAME=None,
+        HYBRID_LLM_PROVIDER=None,
         HYBRID_LLM_API_KEY=None,
         HYBRID_LLM_BASE_URL=None,
         HYBRID_LLM_MODEL_NAME=None,
+        AGENTIC_LLM_PROVIDER=None,
         AGENTIC_LLM_API_KEY=None,
         AGENTIC_LLM_BASE_URL=None,
         AGENTIC_LLM_MODEL_NAME=None,
+        RERANK_LLM_PROVIDER=None,
         RERANK_LLM_API_KEY=None,
         RERANK_LLM_BASE_URL=None,
         RERANK_LLM_MODEL_NAME="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        effective_contextual_provider=LLMProvider.OPENAI,
         effective_contextual_api_key=None,
         effective_contextual_base_url=None,
         effective_contextual_model_name=None,
+        effective_hybrid_provider=LLMProvider.OPENAI,
         effective_hybrid_api_key=None,
         effective_hybrid_base_url=None,
         effective_hybrid_model_name=None,
+        effective_agentic_provider=LLMProvider.OPENAI,
         effective_agentic_api_key=None,
         effective_agentic_base_url=None,
         effective_agentic_model_name=None,
+        effective_rerank_provider=LLMProvider.OPENAI,
         effective_rerank_api_key=None,
         effective_rerank_base_url=None,
         effective_rerank_model_name="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        effective_embedding_api_url="http://localhost:11434/api/embeddings",
+        effective_embedding_model_name="nomic-embed-text",
+        effective_embedding_max_retries=2,
+        effective_embedding_retry_delay_seconds=0.001,
     )
     defaults.update(kw)
     defaults["effective_contextual_api_key"] = defaults.get("CONTEXTUAL_LLM_API_KEY") or defaults.get(
         "DEFAULT_LLM_API_KEY"
+    )
+    defaults["effective_contextual_provider"] = defaults.get("CONTEXTUAL_LLM_PROVIDER") or defaults.get(
+        "DEFAULT_LLM_PROVIDER"
     )
     defaults["effective_contextual_base_url"] = defaults.get("CONTEXTUAL_LLM_BASE_URL") or defaults.get(
         "DEFAULT_LLM_BASE_URL"
@@ -132,11 +152,15 @@ def _fake_settings(**kw):
         "DEFAULT_LLM_MODEL_NAME"
     )
     defaults["effective_hybrid_api_key"] = defaults.get("HYBRID_LLM_API_KEY") or defaults.get("DEFAULT_LLM_API_KEY")
+    defaults["effective_hybrid_provider"] = defaults.get("HYBRID_LLM_PROVIDER") or defaults.get("DEFAULT_LLM_PROVIDER")
     defaults["effective_hybrid_base_url"] = defaults.get("HYBRID_LLM_BASE_URL") or defaults.get("DEFAULT_LLM_BASE_URL")
     defaults["effective_hybrid_model_name"] = defaults.get("HYBRID_LLM_MODEL_NAME") or defaults.get(
         "DEFAULT_LLM_MODEL_NAME"
     )
     defaults["effective_agentic_api_key"] = defaults.get("AGENTIC_LLM_API_KEY") or defaults.get("DEFAULT_LLM_API_KEY")
+    defaults["effective_agentic_provider"] = defaults.get("AGENTIC_LLM_PROVIDER") or defaults.get(
+        "DEFAULT_LLM_PROVIDER"
+    )
     defaults["effective_agentic_base_url"] = defaults.get("AGENTIC_LLM_BASE_URL") or defaults.get(
         "DEFAULT_LLM_BASE_URL"
     )
@@ -144,12 +168,21 @@ def _fake_settings(**kw):
         "DEFAULT_LLM_MODEL_NAME"
     )
     defaults["effective_rerank_api_key"] = defaults.get("RERANK_LLM_API_KEY") or defaults.get("DEFAULT_LLM_API_KEY")
+    defaults["effective_rerank_provider"] = defaults.get("RERANK_LLM_PROVIDER") or defaults.get("DEFAULT_LLM_PROVIDER")
     defaults["effective_rerank_base_url"] = defaults.get("RERANK_LLM_BASE_URL") or defaults.get("DEFAULT_LLM_BASE_URL")
     defaults["effective_rerank_model_name"] = (
         defaults.get("RERANK_LLM_MODEL_NAME")
         or defaults.get("DEFAULT_LLM_MODEL_NAME")
         or "cross-encoder/ms-marco-MiniLM-L-6-v2"
     )
+    defaults["effective_embedding_api_url"] = defaults.get("EMBEDDING_API_URL")
+    defaults["effective_embedding_model_name"] = defaults.get("EMBEDDING_MODEL_NAME") or (
+        "text-embedding-3-small"
+        if defaults.get("EMBEDDING_PROVIDER") == EmbeddingProvider.OPENAI
+        else "nomic-embed-text"
+    )
+    defaults["effective_embedding_max_retries"] = defaults.get("EMBEDDING_MAX_RETRIES")
+    defaults["effective_embedding_retry_delay_seconds"] = defaults.get("EMBEDDING_RETRY_DELAY_SECONDS")
     return MagicMock(**defaults)
 
 
@@ -194,8 +227,8 @@ class TestSettingsValidation:
         s = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
             EMBEDDING_PROVIDER="ollama",
-            OLLAMA_API_URL="http://localhost:11434/api/embeddings",
-            OLLAMA_EMBED_MODEL="m",
+            EMBEDDING_API_URL="http://localhost:11434/api/embeddings",
+            EMBEDDING_MODEL_NAME="m",
             DEFAULT_LLM_API_KEY=None,
             DEFAULT_LLM_BASE_URL=None,
             DEFAULT_LLM_MODEL_NAME=None,
@@ -206,8 +239,8 @@ class TestSettingsValidation:
         s = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
             EMBEDDING_PROVIDER="ollama",
-            OLLAMA_API_URL="http://localhost:11434/api/embeddings",
-            OLLAMA_EMBED_MODEL="m",
+            EMBEDDING_API_URL="http://localhost:11434/api/embeddings",
+            EMBEDDING_MODEL_NAME="m",
             DEFAULT_LLM_API_KEY="key",
             DEFAULT_LLM_BASE_URL="http://llm",
             DEFAULT_LLM_MODEL_NAME="model",
@@ -220,8 +253,8 @@ class TestSettingsValidation:
         s = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
             EMBEDDING_PROVIDER="ollama",
-            OLLAMA_API_URL="http://localhost:11434/api/embeddings",
-            OLLAMA_EMBED_MODEL="m",
+            EMBEDDING_API_URL="http://localhost:11434/api/embeddings",
+            EMBEDDING_MODEL_NAME="m",
             DEFAULT_LLM_MODEL_NAME="default-model",
             CONTEXTUAL_LLM_MODEL_NAME="ctx-model",
         )
@@ -233,16 +266,27 @@ class TestSettingsValidation:
                 POSTGRES_URL="postgresql://u:p@h/db",
                 EMBEDDING_PROVIDER="openai",
                 OPENAI_API_KEY=None,
-                OLLAMA_API_URL="http://localhost:11434/api/embeddings",
-                OLLAMA_EMBED_MODEL="m",
+                EMBEDDING_API_URL="http://localhost:11434/api/embeddings",
+                EMBEDDING_MODEL_NAME="m",
+            )
+
+    def test_openai_missing_key_with_base_url_still_raises(self):
+        with pytest.raises(Exception, match="OPENAI_API_KEY"):
+            Settings(
+                POSTGRES_URL="postgresql://u:p@h/db",
+                EMBEDDING_PROVIDER="openai",
+                OPENAI_API_KEY=None,
+                OPENAI_BASE_URL="http://ollama:11434/v1",
+                EMBEDDING_API_URL="http://localhost:11434/api/embeddings",
+                EMBEDDING_MODEL_NAME="m",
             )
 
     def test_valid_settings_ok(self):
         s = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
             EMBEDDING_PROVIDER="ollama",
-            OLLAMA_API_URL="http://localhost:11434/api/embeddings",
-            OLLAMA_EMBED_MODEL="m",
+            EMBEDDING_API_URL="http://localhost:11434/api/embeddings",
+            EMBEDDING_MODEL_NAME="m",
         )
         assert s.EMBEDDING_PROVIDER == EmbeddingProvider.OLLAMA
 
@@ -250,8 +294,8 @@ class TestSettingsValidation:
         s = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
             EMBEDDING_PROVIDER="ollama",
-            OLLAMA_API_URL="http://localhost:11434/api/embeddings",
-            OLLAMA_EMBED_MODEL="m",
+            EMBEDDING_API_URL="http://localhost:11434/api/embeddings",
+            EMBEDDING_MODEL_NAME="m",
             DEFAULT_LLM_BASE_URL="http://default-llm",
             DEFAULT_LLM_API_KEY="default-key",
             RERANK_LLM_BASE_URL=None,
@@ -264,8 +308,8 @@ class TestSettingsValidation:
         with_default = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
             EMBEDDING_PROVIDER="ollama",
-            OLLAMA_API_URL="http://localhost:11434/api/embeddings",
-            OLLAMA_EMBED_MODEL="m",
+            EMBEDDING_API_URL="http://localhost:11434/api/embeddings",
+            EMBEDDING_MODEL_NAME="m",
             DEFAULT_LLM_MODEL_NAME="default-rerank-model",
             RERANK_LLM_MODEL_NAME="",
         )
@@ -274,12 +318,58 @@ class TestSettingsValidation:
         with_builtin = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
             EMBEDDING_PROVIDER="ollama",
-            OLLAMA_API_URL="http://localhost:11434/api/embeddings",
-            OLLAMA_EMBED_MODEL="m",
+            EMBEDDING_API_URL="http://localhost:11434/api/embeddings",
+            EMBEDDING_MODEL_NAME="m",
             DEFAULT_LLM_MODEL_NAME="",
             RERANK_LLM_MODEL_NAME="",
         )
         assert with_builtin.effective_rerank_model_name == "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+    def test_effective_embedding_properties_use_configured_values(self):
+        s = Settings(
+            POSTGRES_URL="postgresql://u:p@h/db",
+            EMBEDDING_PROVIDER="ollama",
+            EMBEDDING_API_URL="http://ollama:11434/api/embeddings",
+            EMBEDDING_MODEL_NAME="nomic-embed-text",
+            EMBEDDING_MAX_RETRIES=7,
+            EMBEDDING_RETRY_DELAY_SECONDS=0.25,
+        )
+        assert s.effective_embedding_api_url == "http://ollama:11434/api/embeddings"
+        assert s.effective_embedding_model_name == "nomic-embed-text"
+        assert s.effective_embedding_max_retries == 7
+        assert s.effective_embedding_retry_delay_seconds == pytest.approx(0.25)
+
+    def test_effective_embedding_model_defaults_for_openai(self):
+        s = Settings(
+            POSTGRES_URL="postgresql://u:p@h/db",
+            EMBEDDING_PROVIDER="openai",
+            OPENAI_API_KEY="sk-test",
+            EMBEDDING_MODEL_NAME=None,
+        )
+        assert s.effective_embedding_model_name == "text-embedding-3-small"
+
+    def test_effective_embedding_model_defaults_for_ollama(self):
+        s = Settings(
+            POSTGRES_URL="postgresql://u:p@h/db",
+            EMBEDDING_PROVIDER="ollama",
+            EMBEDDING_MODEL_NAME=None,
+        )
+        assert s.effective_embedding_model_name == "nomic-embed-text"
+
+    def test_effective_llm_provider_fallbacks_and_overrides(self):
+        s = Settings(
+            POSTGRES_URL="postgresql://u:p@h/db",
+            EMBEDDING_PROVIDER="ollama",
+            DEFAULT_LLM_PROVIDER="openai",
+            CONTEXTUAL_LLM_PROVIDER="ollama",
+            HYBRID_LLM_PROVIDER=None,
+            AGENTIC_LLM_PROVIDER="ollama",
+            RERANK_LLM_PROVIDER=None,
+        )
+        assert s.effective_contextual_provider == LLMProvider.OLLAMA
+        assert s.effective_hybrid_provider == LLMProvider.OPENAI
+        assert s.effective_agentic_provider == LLMProvider.OLLAMA
+        assert s.effective_rerank_provider == LLMProvider.OPENAI
 
 
 # ---------------------------------------------------------------------------
@@ -418,7 +508,10 @@ class TestOllamaEmbedding:
         )
 
         with (
-            patch("src.utils.settings", _fake_settings(OLLAMA_MAX_RETRIES=2, OLLAMA_RETRY_DELAY_SECONDS=0.001)),
+            patch(
+                "src.utils.settings",
+                _fake_settings(EMBEDDING_MAX_RETRIES=2, EMBEDDING_RETRY_DELAY_SECONDS=0.001),
+            ),
             patch("src.utils.httpx.AsyncClient", return_value=mc),
             patch("src.utils.asyncio.sleep", new_callable=AsyncMock),
         ):
@@ -441,7 +534,10 @@ class TestOllamaEmbedding:
         )
 
         with (
-            patch("src.utils.settings", _fake_settings(OLLAMA_MAX_RETRIES=2, OLLAMA_RETRY_DELAY_SECONDS=0.001)),
+            patch(
+                "src.utils.settings",
+                _fake_settings(EMBEDDING_MAX_RETRIES=2, EMBEDDING_RETRY_DELAY_SECONDS=0.001),
+            ),
             patch("src.utils.httpx.AsyncClient", return_value=mc),
             patch("src.utils.asyncio.sleep", new_callable=AsyncMock),
         ):
@@ -455,7 +551,10 @@ class TestOllamaEmbedding:
         mc = self._make_client(side_effect=httpx_lib.TimeoutException("timeout"))
 
         with (
-            patch("src.utils.settings", _fake_settings(OLLAMA_MAX_RETRIES=2, OLLAMA_RETRY_DELAY_SECONDS=0.001)),
+            patch(
+                "src.utils.settings",
+                _fake_settings(EMBEDDING_MAX_RETRIES=2, EMBEDDING_RETRY_DELAY_SECONDS=0.001),
+            ),
             patch("src.utils.httpx.AsyncClient", return_value=mc),
             patch("src.utils.asyncio.sleep", new_callable=AsyncMock),
         ):
@@ -471,7 +570,7 @@ class TestOllamaEmbedding:
         mc = self._make_client(side_effect=httpx_lib.HTTPStatusError("error", request=MagicMock(), response=error_resp))
 
         with (
-            patch("src.utils.settings", _fake_settings(OLLAMA_MAX_RETRIES=1)),
+            patch("src.utils.settings", _fake_settings(EMBEDDING_MAX_RETRIES=1)),
             patch("src.utils.httpx.AsyncClient", return_value=mc),
         ):
             with pytest.raises(EmbeddingError):
@@ -485,7 +584,7 @@ class TestOllamaEmbedding:
         mc = self._make_client(return_value=mock_resp)
 
         with (
-            patch("src.utils.settings", _fake_settings(OLLAMA_MAX_RETRIES=1)),
+            patch("src.utils.settings", _fake_settings(EMBEDDING_MAX_RETRIES=1)),
             patch("src.utils.httpx.AsyncClient", return_value=mc),
         ):
             with pytest.raises(EmbeddingError):
@@ -499,7 +598,7 @@ class TestOllamaEmbedding:
         mc = self._make_client(return_value=mock_resp)
 
         with (
-            patch("src.utils.settings", _fake_settings(OLLAMA_MAX_RETRIES=1)),
+            patch("src.utils.settings", _fake_settings(EMBEDDING_MAX_RETRIES=1)),
             patch("src.utils.httpx.AsyncClient", return_value=mc),
         ):
             with pytest.raises(EmbeddingError):
@@ -510,7 +609,7 @@ class TestOllamaEmbedding:
         mc = self._make_client(side_effect=RuntimeError("unexpected"))
 
         with (
-            patch("src.utils.settings", _fake_settings(OLLAMA_MAX_RETRIES=1)),
+            patch("src.utils.settings", _fake_settings(EMBEDDING_MAX_RETRIES=1)),
             patch("src.utils.httpx.AsyncClient", return_value=mc),
         ):
             with pytest.raises(EmbeddingError):
@@ -537,7 +636,7 @@ class TestOpenAIEmbedding:
                 _fake_settings(
                     EMBEDDING_PROVIDER=EmbeddingProvider.OPENAI,
                     OPENAI_API_KEY="sk-test",
-                    OPENAI_EMBED_MODEL="text-embedding-3-small",
+                    EMBEDDING_MODEL_NAME="text-embedding-3-small",
                     OPENAI_BASE_URL=None,
                 ),
             ),
@@ -568,6 +667,30 @@ class TestOpenAIEmbedding:
             await _create_openai_embedding("hello")
         call_kwargs = MockOA.call_args[1]
         assert call_kwargs.get("base_url") == "http://custom:11434"
+
+    @pytest.mark.asyncio
+    async def test_with_custom_base_url_without_api_key_keeps_none(self):
+        mock_client = AsyncMock()
+        mock_client.embeddings.create = AsyncMock(
+            return_value=MagicMock(data=[MagicMock(embedding=[0.0, 1.0, 0.0, 0.0])])
+        )
+        mock_client.close = AsyncMock()
+
+        with (
+            patch(
+                "src.utils.settings",
+                _fake_settings(
+                    EMBEDDING_PROVIDER=EmbeddingProvider.OPENAI,
+                    OPENAI_API_KEY=None,
+                    OPENAI_BASE_URL="http://ollama:11434/v1",
+                ),
+            ),
+            patch("src.utils.AsyncOpenAI", return_value=mock_client) as MockOA,
+        ):
+            await _create_openai_embedding("hello")
+        call_kwargs = MockOA.call_args[1]
+        assert call_kwargs.get("api_key") is None
+        assert call_kwargs.get("base_url") == "http://ollama:11434/v1"
 
     @pytest.mark.asyncio
     async def test_api_failure_raises_embedding_error(self):
@@ -652,6 +775,33 @@ class TestContextualText:
         assert enriched is True
         assert "great context" in text
         assert "chunk text" in text
+
+    @pytest.mark.asyncio
+    async def test_llm_enriches_text_with_base_url_and_no_api_key(self):
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create = AsyncMock(
+            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content="great context"))])
+        )
+        mock_client.close = AsyncMock()
+
+        with (
+            patch(
+                "src.utils.settings",
+                _fake_settings(
+                    USE_CONTEXTUAL_EMBEDDINGS=True,
+                    DEFAULT_LLM_PROVIDER=LLMProvider.OLLAMA,
+                    DEFAULT_LLM_API_KEY=None,
+                    DEFAULT_LLM_BASE_URL="http://ollama:11434/v1",
+                    DEFAULT_LLM_MODEL_NAME="llama3.1:8b",
+                ),
+            ),
+            patch("src.utils.AsyncOpenAI", return_value=mock_client) as mock_async_openai,
+        ):
+            _text, _enriched = await generate_contextual_text("full doc", "chunk text")
+
+        kwargs = mock_async_openai.call_args[1]
+        assert kwargs["api_key"] == "ollama"
+        assert kwargs["base_url"] == "http://ollama:11434/v1"
 
     @pytest.mark.asyncio
     async def test_llm_empty_response_returns_original(self):
@@ -1334,6 +1484,79 @@ class TestRerankResults:
             out = rerank_results("q", results, top_k=2)
         assert out[0]["id"] == 2
         assert out[0]["rerank_score"] == 0.8
+
+    def test_openai_compatible_rerank_with_base_url(self):
+        results = [{"content": "a", "id": 1}, {"content": "b", "id": 2}]
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content='{"scores":[0.2,0.9]}'))]
+        )
+
+        with (
+            patch(
+                "src.utils.settings",
+                _fake_settings(
+                    USE_RERANKING=True,
+                    RERANK_LLM_PROVIDER=LLMProvider.OLLAMA,
+                    RERANK_LLM_BASE_URL="http://localhost:11434/v1",
+                    RERANK_LLM_MODEL_NAME="hf.co/godkingleto/zerank-2-Q4_K_M-GGUF:Q4_K_M",
+                ),
+            ),
+            patch("src.utils.OpenAI", return_value=mock_client) as mock_openai,
+        ):
+            out = rerank_results("q", results, top_k=2)
+
+        call_kwargs = mock_openai.call_args[1]
+        assert call_kwargs.get("base_url") == "http://localhost:11434/v1"
+        assert out[0]["id"] == 2
+        assert out[0]["rerank_score"] == pytest.approx(0.9)
+        mock_client.close.assert_called_once()
+
+    def test_openai_compatible_invalid_response_falls_back(self):
+        results = [{"content": "a", "id": 1}, {"content": "b", "id": 2}]
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content='{"scores":[0.2]}'))]
+        )
+
+        with (
+            patch(
+                "src.utils.settings",
+                _fake_settings(
+                    USE_RERANKING=True,
+                    RERANK_LLM_PROVIDER=LLMProvider.OLLAMA,
+                    RERANK_LLM_BASE_URL="http://localhost:11434/v1",
+                    RERANK_LLM_MODEL_NAME="hf.co/godkingleto/zerank-2-Q4_K_M-GGUF:Q4_K_M",
+                ),
+            ),
+            patch("src.utils.OpenAI", return_value=mock_client),
+        ):
+            out = rerank_results("q", results, top_k=2)
+
+        assert [row["id"] for row in out] == [1, 2]
+
+
+class TestParseRerankScores:
+    def test_non_string_content_returns_none(self):
+        response = MagicMock(choices=[MagicMock(message=MagicMock(content=None))])
+        assert _parse_rerank_scores(response, expected_count=1) is None
+
+    def test_invalid_json_returns_none(self):
+        assert _rerank_json_payload("{not-json") is None
+
+    def test_none_payload_returns_none_scores(self):
+        assert _rerank_score_values(None, expected_count=1) is None
+
+
+class TestResolvedOpenAIApiKey:
+    def test_prefers_explicit_key(self):
+        assert _resolved_openai_api_key("sk-real", LLMProvider.OLLAMA) == "sk-real"
+
+    def test_uses_ollama_placeholder_when_provider_is_ollama(self):
+        assert _resolved_openai_api_key(None, LLMProvider.OLLAMA) == "ollama"
+
+    def test_returns_none_without_key_for_openai_provider(self):
+        assert _resolved_openai_api_key(None, LLMProvider.OPENAI) is None
 
 
 # ---------------------------------------------------------------------------

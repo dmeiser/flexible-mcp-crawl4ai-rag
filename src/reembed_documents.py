@@ -42,9 +42,7 @@ async def reembed_all() -> None:
 
 
 def _current_model() -> str:
-    if settings.EMBEDDING_PROVIDER.value == "openai":
-        return settings.OPENAI_EMBED_MODEL
-    return settings.OLLAMA_EMBED_MODEL
+    return settings.effective_embedding_model_name
 
 
 if __name__ == "__main__":
