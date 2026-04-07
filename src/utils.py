@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import re
+import time
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, Generator, List, Optional, Sequence, Tuple, cast
@@ -113,6 +114,8 @@ class Settings(BaseSettings):
     DEFAULT_LLM_BASE_URL: Optional[str] = None
     DEFAULT_LLM_API_KEY: Optional[str] = None
     DEFAULT_LLM_MODEL_NAME: Optional[str] = None
+    DEFAULT_LLM_MAX_RETRIES: int = 3
+    DEFAULT_LLM_RETRY_DELAY_SECONDS: float = 1.0
 
     # Per-feature LLM overrides — all fall back to DEFAULT_LLM_* when unset.
     # A feature's LLM is considered active when its effective model name is set.
@@ -122,18 +125,24 @@ class Settings(BaseSettings):
     CONTEXTUAL_LLM_BASE_URL: Optional[str] = None
     CONTEXTUAL_LLM_API_KEY: Optional[str] = None
     CONTEXTUAL_LLM_MODEL_NAME: Optional[str] = None
+    CONTEXTUAL_LLM_MAX_RETRIES: Optional[int] = None
+    CONTEXTUAL_LLM_RETRY_DELAY_SECONDS: Optional[float] = None
 
     # 2. Hybrid search
     HYBRID_LLM_PROVIDER: Optional[LLMProvider] = None
     HYBRID_LLM_BASE_URL: Optional[str] = None
     HYBRID_LLM_API_KEY: Optional[str] = None
     HYBRID_LLM_MODEL_NAME: Optional[str] = None
+    HYBRID_LLM_MAX_RETRIES: Optional[int] = None
+    HYBRID_LLM_RETRY_DELAY_SECONDS: Optional[float] = None
 
     # 3. Agentic RAG (requires USE_AGENTIC_RAG=true)
     AGENTIC_LLM_PROVIDER: Optional[LLMProvider] = None
     AGENTIC_LLM_BASE_URL: Optional[str] = None
     AGENTIC_LLM_API_KEY: Optional[str] = None
     AGENTIC_LLM_MODEL_NAME: Optional[str] = None
+    AGENTIC_LLM_MAX_RETRIES: Optional[int] = None
+    AGENTIC_LLM_RETRY_DELAY_SECONDS: Optional[float] = None
 
     # 4. Reranking (requires USE_RERANKING=true)
     #    RERANK_LLM_MODEL_NAME also doubles as the local CrossEncoder model name
@@ -142,6 +151,8 @@ class Settings(BaseSettings):
     RERANK_LLM_BASE_URL: Optional[str] = None
     RERANK_LLM_API_KEY: Optional[str] = None
     RERANK_LLM_MODEL_NAME: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    RERANK_LLM_MAX_RETRIES: Optional[int] = None
+    RERANK_LLM_RETRY_DELAY_SECONDS: Optional[float] = None
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -189,6 +200,14 @@ class Settings(BaseSettings):
         return self.CONTEXTUAL_LLM_MODEL_NAME or self.DEFAULT_LLM_MODEL_NAME
 
     @property
+    def effective_contextual_max_retries(self) -> int:
+        return int(self.CONTEXTUAL_LLM_MAX_RETRIES or self.DEFAULT_LLM_MAX_RETRIES)
+
+    @property
+    def effective_contextual_retry_delay_seconds(self) -> float:
+        return float(self.CONTEXTUAL_LLM_RETRY_DELAY_SECONDS or self.DEFAULT_LLM_RETRY_DELAY_SECONDS)
+
+    @property
     def effective_hybrid_base_url(self) -> Optional[str]:
         return self.HYBRID_LLM_BASE_URL or self.DEFAULT_LLM_BASE_URL
 
@@ -203,6 +222,14 @@ class Settings(BaseSettings):
     @property
     def effective_hybrid_model_name(self) -> Optional[str]:
         return self.HYBRID_LLM_MODEL_NAME or self.DEFAULT_LLM_MODEL_NAME
+
+    @property
+    def effective_hybrid_max_retries(self) -> int:
+        return int(self.HYBRID_LLM_MAX_RETRIES or self.DEFAULT_LLM_MAX_RETRIES)
+
+    @property
+    def effective_hybrid_retry_delay_seconds(self) -> float:
+        return float(self.HYBRID_LLM_RETRY_DELAY_SECONDS or self.DEFAULT_LLM_RETRY_DELAY_SECONDS)
 
     @property
     def effective_agentic_base_url(self) -> Optional[str]:
@@ -221,6 +248,14 @@ class Settings(BaseSettings):
         return self.AGENTIC_LLM_MODEL_NAME or self.DEFAULT_LLM_MODEL_NAME
 
     @property
+    def effective_agentic_max_retries(self) -> int:
+        return int(self.AGENTIC_LLM_MAX_RETRIES or self.DEFAULT_LLM_MAX_RETRIES)
+
+    @property
+    def effective_agentic_retry_delay_seconds(self) -> float:
+        return float(self.AGENTIC_LLM_RETRY_DELAY_SECONDS or self.DEFAULT_LLM_RETRY_DELAY_SECONDS)
+
+    @property
     def effective_rerank_base_url(self) -> Optional[str]:
         return self.RERANK_LLM_BASE_URL or self.DEFAULT_LLM_BASE_URL
 
@@ -235,6 +270,14 @@ class Settings(BaseSettings):
     @property
     def effective_rerank_model_name(self) -> str:
         return self.RERANK_LLM_MODEL_NAME or self.DEFAULT_LLM_MODEL_NAME or "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+    @property
+    def effective_rerank_max_retries(self) -> int:
+        return int(self.RERANK_LLM_MAX_RETRIES or self.DEFAULT_LLM_MAX_RETRIES)
+
+    @property
+    def effective_rerank_retry_delay_seconds(self) -> float:
+        return float(self.RERANK_LLM_RETRY_DELAY_SECONDS or self.DEFAULT_LLM_RETRY_DELAY_SECONDS)
 
     @model_validator(mode="after")
     def check_openai_config_if_selected(self) -> "Settings":
@@ -633,10 +676,16 @@ async def _request_contextual_summary(full_document: str, chunk: str) -> str:
         base_url=settings.effective_contextual_base_url,
     )
     try:
-        resp = await client.chat.completions.create(
-            model=settings.effective_contextual_model_name,
-            messages=[{"role": "user", "content": _context_prompt(full_document, chunk)}],
-            max_tokens=150,
+        resp = await _async_chat_completion_with_retries(
+            client=client,
+            request_kwargs={
+                "model": settings.effective_contextual_model_name,
+                "messages": [{"role": "user", "content": _context_prompt(full_document, chunk)}],
+                "max_tokens": 150,
+            },
+            max_retries=settings.effective_contextual_max_retries,
+            retry_delay_seconds=settings.effective_contextual_retry_delay_seconds,
+            call_name="contextual LLM",
         )
     finally:
         await client.close()
@@ -1455,6 +1504,44 @@ def _resolved_openai_api_key(api_key: Optional[str], provider: LLMProvider) -> O
     return api_key
 
 
+def _retry_backoff_seconds(base_delay_seconds: float, attempt: int) -> float:
+    return base_delay_seconds * (2 ** (attempt - 1))
+
+
+async def _async_chat_completion_with_retries(
+    client: AsyncOpenAI,
+    request_kwargs: Dict[str, Any],
+    max_retries: int,
+    retry_delay_seconds: float,
+    call_name: str,
+) -> Any:
+    attempts = max(1, int(max_retries))
+    for attempt in range(1, attempts + 1):
+        try:
+            return await client.chat.completions.create(**request_kwargs)
+        except Exception:
+            if attempt >= attempts:
+                raise
+            await asyncio.sleep(_retry_backoff_seconds(float(retry_delay_seconds), attempt))
+
+
+def _sync_chat_completion_with_retries(
+    client: OpenAI,
+    request_kwargs: Dict[str, Any],
+    max_retries: int,
+    retry_delay_seconds: float,
+    call_name: str,
+) -> Any:
+    attempts = max(1, int(max_retries))
+    for attempt in range(1, attempts + 1):
+        try:
+            return client.chat.completions.create(**request_kwargs)
+        except Exception:
+            if attempt >= attempts:
+                raise
+            time.sleep(_retry_backoff_seconds(float(retry_delay_seconds), attempt))
+
+
 def _rerank_with_openai_compatible_api(
     query: str,
     results: List[Dict[str, Any]],
@@ -1465,10 +1552,16 @@ def _rerank_with_openai_compatible_api(
         base_url=settings.effective_rerank_base_url,
     )
     try:
-        response = client.chat.completions.create(
-            model=settings.effective_rerank_model_name,
-            messages=cast(Any, _rerank_messages(query, results)),
-            temperature=0,
+        response = _sync_chat_completion_with_retries(
+            client=client,
+            request_kwargs={
+                "model": settings.effective_rerank_model_name,
+                "messages": cast(Any, _rerank_messages(query, results)),
+                "temperature": 0,
+            },
+            max_retries=settings.effective_rerank_max_retries,
+            retry_delay_seconds=settings.effective_rerank_retry_delay_seconds,
+            call_name="rerank LLM",
         )
     finally:
         close = getattr(client, "close", None)

@@ -28,6 +28,7 @@ from src.utils import (
     LLMProvider,
     OllamaError,
     Settings,
+    _async_chat_completion_with_retries,
     _code_example_row_to_result,
     _create_ollama_embedding,
     _create_openai_embedding,
@@ -46,6 +47,7 @@ from src.utils import (
     _resolve_content_hash,
     _resolve_link_references,
     _resolved_openai_api_key,
+    _sync_chat_completion_with_retries,
     add_code_examples_to_db,
     add_documents_to_db,
     compute_staleness_score,
@@ -100,38 +102,56 @@ def _fake_settings(**kw):
         DEFAULT_LLM_API_KEY=None,
         DEFAULT_LLM_BASE_URL=None,
         DEFAULT_LLM_MODEL_NAME=None,
+        DEFAULT_LLM_MAX_RETRIES=3,
+        DEFAULT_LLM_RETRY_DELAY_SECONDS=1.0,
         CONTEXTUAL_LLM_PROVIDER=None,
         CONTEXTUAL_LLM_API_KEY=None,
         CONTEXTUAL_LLM_BASE_URL=None,
         CONTEXTUAL_LLM_MODEL_NAME=None,
+        CONTEXTUAL_LLM_MAX_RETRIES=None,
+        CONTEXTUAL_LLM_RETRY_DELAY_SECONDS=None,
         HYBRID_LLM_PROVIDER=None,
         HYBRID_LLM_API_KEY=None,
         HYBRID_LLM_BASE_URL=None,
         HYBRID_LLM_MODEL_NAME=None,
+        HYBRID_LLM_MAX_RETRIES=None,
+        HYBRID_LLM_RETRY_DELAY_SECONDS=None,
         AGENTIC_LLM_PROVIDER=None,
         AGENTIC_LLM_API_KEY=None,
         AGENTIC_LLM_BASE_URL=None,
         AGENTIC_LLM_MODEL_NAME=None,
+        AGENTIC_LLM_MAX_RETRIES=None,
+        AGENTIC_LLM_RETRY_DELAY_SECONDS=None,
         RERANK_LLM_PROVIDER=None,
         RERANK_LLM_API_KEY=None,
         RERANK_LLM_BASE_URL=None,
         RERANK_LLM_MODEL_NAME="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        RERANK_LLM_MAX_RETRIES=None,
+        RERANK_LLM_RETRY_DELAY_SECONDS=None,
         effective_contextual_provider=LLMProvider.OPENAI,
         effective_contextual_api_key=None,
         effective_contextual_base_url=None,
         effective_contextual_model_name=None,
+        effective_contextual_max_retries=3,
+        effective_contextual_retry_delay_seconds=1.0,
         effective_hybrid_provider=LLMProvider.OPENAI,
         effective_hybrid_api_key=None,
         effective_hybrid_base_url=None,
         effective_hybrid_model_name=None,
+        effective_hybrid_max_retries=3,
+        effective_hybrid_retry_delay_seconds=1.0,
         effective_agentic_provider=LLMProvider.OPENAI,
         effective_agentic_api_key=None,
         effective_agentic_base_url=None,
         effective_agentic_model_name=None,
+        effective_agentic_max_retries=3,
+        effective_agentic_retry_delay_seconds=1.0,
         effective_rerank_provider=LLMProvider.OPENAI,
         effective_rerank_api_key=None,
         effective_rerank_base_url=None,
         effective_rerank_model_name="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        effective_rerank_max_retries=3,
+        effective_rerank_retry_delay_seconds=1.0,
         effective_embedding_base_url="http://localhost:11434/api/embeddings",
         effective_embedding_ollama_url="http://localhost:11434/api/embeddings",
         effective_embedding_model_name="nomic-embed-text",
@@ -151,11 +171,23 @@ def _fake_settings(**kw):
     defaults["effective_contextual_model_name"] = defaults.get("CONTEXTUAL_LLM_MODEL_NAME") or defaults.get(
         "DEFAULT_LLM_MODEL_NAME"
     )
+    defaults["effective_contextual_max_retries"] = defaults.get("CONTEXTUAL_LLM_MAX_RETRIES") or defaults.get(
+        "DEFAULT_LLM_MAX_RETRIES"
+    )
+    defaults["effective_contextual_retry_delay_seconds"] = defaults.get(
+        "CONTEXTUAL_LLM_RETRY_DELAY_SECONDS"
+    ) or defaults.get("DEFAULT_LLM_RETRY_DELAY_SECONDS")
     defaults["effective_hybrid_api_key"] = defaults.get("HYBRID_LLM_API_KEY") or defaults.get("DEFAULT_LLM_API_KEY")
     defaults["effective_hybrid_provider"] = defaults.get("HYBRID_LLM_PROVIDER") or defaults.get("DEFAULT_LLM_PROVIDER")
     defaults["effective_hybrid_base_url"] = defaults.get("HYBRID_LLM_BASE_URL") or defaults.get("DEFAULT_LLM_BASE_URL")
     defaults["effective_hybrid_model_name"] = defaults.get("HYBRID_LLM_MODEL_NAME") or defaults.get(
         "DEFAULT_LLM_MODEL_NAME"
+    )
+    defaults["effective_hybrid_max_retries"] = defaults.get("HYBRID_LLM_MAX_RETRIES") or defaults.get(
+        "DEFAULT_LLM_MAX_RETRIES"
+    )
+    defaults["effective_hybrid_retry_delay_seconds"] = defaults.get("HYBRID_LLM_RETRY_DELAY_SECONDS") or defaults.get(
+        "DEFAULT_LLM_RETRY_DELAY_SECONDS"
     )
     defaults["effective_agentic_api_key"] = defaults.get("AGENTIC_LLM_API_KEY") or defaults.get("DEFAULT_LLM_API_KEY")
     defaults["effective_agentic_provider"] = defaults.get("AGENTIC_LLM_PROVIDER") or defaults.get(
@@ -167,6 +199,12 @@ def _fake_settings(**kw):
     defaults["effective_agentic_model_name"] = defaults.get("AGENTIC_LLM_MODEL_NAME") or defaults.get(
         "DEFAULT_LLM_MODEL_NAME"
     )
+    defaults["effective_agentic_max_retries"] = defaults.get("AGENTIC_LLM_MAX_RETRIES") or defaults.get(
+        "DEFAULT_LLM_MAX_RETRIES"
+    )
+    defaults["effective_agentic_retry_delay_seconds"] = defaults.get("AGENTIC_LLM_RETRY_DELAY_SECONDS") or defaults.get(
+        "DEFAULT_LLM_RETRY_DELAY_SECONDS"
+    )
     defaults["effective_rerank_api_key"] = defaults.get("RERANK_LLM_API_KEY") or defaults.get("DEFAULT_LLM_API_KEY")
     defaults["effective_rerank_provider"] = defaults.get("RERANK_LLM_PROVIDER") or defaults.get("DEFAULT_LLM_PROVIDER")
     defaults["effective_rerank_base_url"] = defaults.get("RERANK_LLM_BASE_URL") or defaults.get("DEFAULT_LLM_BASE_URL")
@@ -174,6 +212,12 @@ def _fake_settings(**kw):
         defaults.get("RERANK_LLM_MODEL_NAME")
         or defaults.get("DEFAULT_LLM_MODEL_NAME")
         or "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    )
+    defaults["effective_rerank_max_retries"] = defaults.get("RERANK_LLM_MAX_RETRIES") or defaults.get(
+        "DEFAULT_LLM_MAX_RETRIES"
+    )
+    defaults["effective_rerank_retry_delay_seconds"] = defaults.get("RERANK_LLM_RETRY_DELAY_SECONDS") or defaults.get(
+        "DEFAULT_LLM_RETRY_DELAY_SECONDS"
     )
     defaults["effective_embedding_base_url"] = defaults.get("EMBEDDING_BASE_URL")
     defaults["effective_embedding_ollama_url"] = (
@@ -373,6 +417,97 @@ class TestSettingsValidation:
         assert s.effective_hybrid_provider == LLMProvider.OPENAI
         assert s.effective_agentic_provider == LLMProvider.OLLAMA
         assert s.effective_rerank_provider == LLMProvider.OPENAI
+
+    def test_effective_rerank_retry_fallback_and_override(self):
+        fallback = Settings(
+            POSTGRES_URL="postgresql://u:p@h/db",
+            EMBEDDING_PROVIDER="ollama",
+            DEFAULT_LLM_MAX_RETRIES=9,
+            DEFAULT_LLM_RETRY_DELAY_SECONDS=0.75,
+            RERANK_LLM_MAX_RETRIES=None,
+            RERANK_LLM_RETRY_DELAY_SECONDS=None,
+        )
+        assert fallback.effective_rerank_max_retries == 9
+        assert fallback.effective_rerank_retry_delay_seconds == pytest.approx(0.75)
+
+        override = Settings(
+            POSTGRES_URL="postgresql://u:p@h/db",
+            EMBEDDING_PROVIDER="ollama",
+            DEFAULT_LLM_MAX_RETRIES=9,
+            DEFAULT_LLM_RETRY_DELAY_SECONDS=0.75,
+            RERANK_LLM_MAX_RETRIES=2,
+            RERANK_LLM_RETRY_DELAY_SECONDS=0.05,
+        )
+        assert override.effective_rerank_max_retries == 2
+        assert override.effective_rerank_retry_delay_seconds == pytest.approx(0.05)
+
+    def test_effective_hybrid_and_agentic_retry_fallbacks_and_overrides(self):
+        s = Settings(
+            POSTGRES_URL="postgresql://u:p@h/db",
+            EMBEDDING_PROVIDER="ollama",
+            DEFAULT_LLM_MAX_RETRIES=7,
+            DEFAULT_LLM_RETRY_DELAY_SECONDS=0.4,
+            HYBRID_LLM_MAX_RETRIES=None,
+            HYBRID_LLM_RETRY_DELAY_SECONDS=None,
+            AGENTIC_LLM_MAX_RETRIES=2,
+            AGENTIC_LLM_RETRY_DELAY_SECONDS=0.02,
+        )
+        assert s.effective_hybrid_max_retries == 7
+        assert s.effective_hybrid_retry_delay_seconds == pytest.approx(0.4)
+        assert s.effective_agentic_max_retries == 2
+        assert s.effective_agentic_retry_delay_seconds == pytest.approx(0.02)
+
+    def test_effective_contextual_retry_fallback_and_override(self):
+        fallback = Settings(
+            POSTGRES_URL="postgresql://u:p@h/db",
+            EMBEDDING_PROVIDER="ollama",
+            DEFAULT_LLM_MAX_RETRIES=5,
+            DEFAULT_LLM_RETRY_DELAY_SECONDS=0.3,
+            CONTEXTUAL_LLM_MAX_RETRIES=None,
+            CONTEXTUAL_LLM_RETRY_DELAY_SECONDS=None,
+        )
+        assert fallback.effective_contextual_max_retries == 5
+        assert fallback.effective_contextual_retry_delay_seconds == pytest.approx(0.3)
+
+        override = Settings(
+            POSTGRES_URL="postgresql://u:p@h/db",
+            EMBEDDING_PROVIDER="ollama",
+            DEFAULT_LLM_MAX_RETRIES=5,
+            DEFAULT_LLM_RETRY_DELAY_SECONDS=0.3,
+            CONTEXTUAL_LLM_MAX_RETRIES=2,
+            CONTEXTUAL_LLM_RETRY_DELAY_SECONDS=0.05,
+        )
+        assert override.effective_contextual_max_retries == 2
+        assert override.effective_contextual_retry_delay_seconds == pytest.approx(0.05)
+
+
+class TestChatCompletionRetryHelpers:
+    @pytest.mark.asyncio
+    async def test_async_retry_exhaustion_raises(self):
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create = AsyncMock(side_effect=RuntimeError("always fails"))
+
+        with pytest.raises(RuntimeError, match="always fails"):
+            await _async_chat_completion_with_retries(
+                client=mock_client,
+                request_kwargs={"model": "m", "messages": []},
+                max_retries=1,
+                retry_delay_seconds=0.001,
+                call_name="test-async",
+            )
+
+    def test_sync_retry_exhaustion_raises(self):
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = RuntimeError("always fails")
+
+        with pytest.raises(RuntimeError, match="always fails"):
+            _sync_chat_completion_with_retries(
+                client=mock_client,
+                request_kwargs={"model": "m", "messages": []},
+                max_retries=1,
+                retry_delay_seconds=0.001,
+                call_name="test-sync",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -847,6 +982,38 @@ class TestContextualText:
             text, enriched = await generate_contextual_text("doc", "chunk")
         assert text == "chunk"
         assert enriched is False
+
+    @pytest.mark.asyncio
+    async def test_contextual_llm_retries_then_succeeds(self):
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create = AsyncMock(
+            side_effect=[
+                RuntimeError("temporary"),
+                MagicMock(choices=[MagicMock(message=MagicMock(content="retry context"))]),
+            ]
+        )
+        mock_client.close = AsyncMock()
+
+        with (
+            patch(
+                "src.utils.settings",
+                _fake_settings(
+                    USE_CONTEXTUAL_EMBEDDINGS=True,
+                    DEFAULT_LLM_API_KEY="key",
+                    DEFAULT_LLM_BASE_URL="http://llm",
+                    DEFAULT_LLM_MODEL_NAME="model",
+                    DEFAULT_LLM_MAX_RETRIES=2,
+                    DEFAULT_LLM_RETRY_DELAY_SECONDS=0.001,
+                ),
+            ),
+            patch("src.utils.AsyncOpenAI", return_value=mock_client),
+            patch("src.utils.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+        ):
+            text, enriched = await generate_contextual_text("full doc", "chunk text")
+
+        assert enriched is True
+        assert "retry context" in text
+        mock_sleep.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -1537,6 +1704,34 @@ class TestRerankResults:
             out = rerank_results("q", results, top_k=2)
 
         assert [row["id"] for row in out] == [1, 2]
+
+    def test_openai_compatible_retries_then_succeeds(self):
+        results = [{"content": "a", "id": 1}, {"content": "b", "id": 2}]
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = [
+            RuntimeError("temporary"),
+            MagicMock(choices=[MagicMock(message=MagicMock(content='{"scores":[0.4,0.8]}'))]),
+        ]
+
+        with (
+            patch(
+                "src.utils.settings",
+                _fake_settings(
+                    USE_RERANKING=True,
+                    RERANK_LLM_PROVIDER=LLMProvider.OLLAMA,
+                    RERANK_LLM_BASE_URL="http://localhost:11434/v1",
+                    RERANK_LLM_MODEL_NAME="hf.co/godkingleto/zerank-2-Q4_K_M-GGUF:Q4_K_M",
+                    DEFAULT_LLM_MAX_RETRIES=2,
+                    DEFAULT_LLM_RETRY_DELAY_SECONDS=0.001,
+                ),
+            ),
+            patch("src.utils.OpenAI", return_value=mock_client),
+            patch("src.utils.time.sleep") as mock_sleep,
+        ):
+            out = rerank_results("q", results, top_k=2)
+
+        assert out[0]["id"] == 2
+        mock_sleep.assert_called_once()
 
 
 class TestParseRerankScores:
