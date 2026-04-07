@@ -136,9 +136,7 @@ def _fake_settings(**kw):
     defaults["effective_hybrid_model_name"] = defaults.get("HYBRID_LLM_MODEL_NAME") or defaults.get(
         "DEFAULT_LLM_MODEL_NAME"
     )
-    defaults["effective_agentic_api_key"] = defaults.get("AGENTIC_LLM_API_KEY") or defaults.get(
-        "DEFAULT_LLM_API_KEY"
-    )
+    defaults["effective_agentic_api_key"] = defaults.get("AGENTIC_LLM_API_KEY") or defaults.get("DEFAULT_LLM_API_KEY")
     defaults["effective_agentic_base_url"] = defaults.get("AGENTIC_LLM_BASE_URL") or defaults.get(
         "DEFAULT_LLM_BASE_URL"
     )
@@ -247,6 +245,41 @@ class TestSettingsValidation:
             OLLAMA_EMBED_MODEL="m",
         )
         assert s.EMBEDDING_PROVIDER == EmbeddingProvider.OLLAMA
+
+    def test_rerank_effective_base_url_and_api_key_fallback_to_default(self):
+        s = Settings(
+            POSTGRES_URL="postgresql://u:p@h/db",
+            EMBEDDING_PROVIDER="ollama",
+            OLLAMA_API_URL="http://localhost:11434/api/embeddings",
+            OLLAMA_EMBED_MODEL="m",
+            DEFAULT_LLM_BASE_URL="http://default-llm",
+            DEFAULT_LLM_API_KEY="default-key",
+            RERANK_LLM_BASE_URL=None,
+            RERANK_LLM_API_KEY=None,
+        )
+        assert s.effective_rerank_base_url == "http://default-llm"
+        assert s.effective_rerank_api_key == "default-key"
+
+    def test_rerank_effective_model_fallback_prefers_default_then_builtin(self):
+        with_default = Settings(
+            POSTGRES_URL="postgresql://u:p@h/db",
+            EMBEDDING_PROVIDER="ollama",
+            OLLAMA_API_URL="http://localhost:11434/api/embeddings",
+            OLLAMA_EMBED_MODEL="m",
+            DEFAULT_LLM_MODEL_NAME="default-rerank-model",
+            RERANK_LLM_MODEL_NAME="",
+        )
+        assert with_default.effective_rerank_model_name == "default-rerank-model"
+
+        with_builtin = Settings(
+            POSTGRES_URL="postgresql://u:p@h/db",
+            EMBEDDING_PROVIDER="ollama",
+            OLLAMA_API_URL="http://localhost:11434/api/embeddings",
+            OLLAMA_EMBED_MODEL="m",
+            DEFAULT_LLM_MODEL_NAME="",
+            RERANK_LLM_MODEL_NAME="",
+        )
+        assert with_builtin.effective_rerank_model_name == "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 
 # ---------------------------------------------------------------------------

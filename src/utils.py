@@ -188,11 +188,7 @@ class Settings(BaseSettings):
 
     @property
     def effective_rerank_model_name(self) -> str:
-        return (
-            self.RERANK_LLM_MODEL_NAME
-            or self.DEFAULT_LLM_MODEL_NAME
-            or "cross-encoder/ms-marco-MiniLM-L-6-v2"
-        )
+        return self.RERANK_LLM_MODEL_NAME or self.DEFAULT_LLM_MODEL_NAME or "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
     @model_validator(mode="after")
     def check_openai_config_if_selected(self) -> "Settings":
@@ -577,7 +573,9 @@ def _context_prompt(full_document: str, chunk: str) -> str:
 
 async def _request_contextual_summary(full_document: str, chunk: str) -> str:
     if not settings.effective_contextual_model_name:
-        logger.warning("CONTEXTUAL_LLM_MODEL_NAME (or DEFAULT_LLM_MODEL_NAME) is not configured; skipping contextual enrichment.")
+        logger.warning(
+            "CONTEXTUAL_LLM_MODEL_NAME (or DEFAULT_LLM_MODEL_NAME) is not configured; skipping contextual enrichment."
+        )
         return ""
 
     client = AsyncOpenAI(api_key=settings.effective_contextual_api_key, base_url=settings.effective_contextual_base_url)

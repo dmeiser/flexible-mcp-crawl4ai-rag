@@ -894,9 +894,7 @@ async def test_search_freshness_controls(ctx: TestContext) -> None:
 async def test_get_document_by_id_round_trip(ctx: TestContext) -> None:
     """get_document_by_id must retrieve the exact document stored by test_index_markdown."""
     first_chunk_id = ctx.first_chunk_id or _PYTEST_FIRST_CHUNK_ID
-    assert first_chunk_id is not None, (
-        "Cannot run round-trip test: test_index_markdown did not provide first_chunk_id"
-    )
+    assert first_chunk_id is not None, "Cannot run round-trip test: test_index_markdown did not provide first_chunk_id"
     data = json.loads(
         (
             await ctx.client.call_tool(

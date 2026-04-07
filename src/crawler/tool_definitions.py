@@ -411,15 +411,30 @@ def _bm25_filter(query: Optional[str], threshold: Optional[float]) -> Any:
     return BM25ContentFilter(user_query=query, bm25_threshold=_numeric_threshold(threshold, 1.0))
 
 
+def _first_non_empty_string(*values: Optional[str]) -> Optional[str]:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
 def _resolved_llm_config(llm_provider: Optional[str]) -> LLMConfig:
     provider = (
-        llm_provider
-        or settings.effective_agentic_model_name
-        or settings.effective_hybrid_model_name
+        _first_non_empty_string(
+            llm_provider,
+            settings.effective_agentic_model_name,
+            settings.effective_hybrid_model_name,
+        )
         or "openai/gpt-4o"
     )
-    api_token = settings.effective_agentic_api_key or settings.effective_hybrid_api_key
-    base_url = settings.effective_agentic_base_url or settings.effective_hybrid_base_url
+    api_token = _first_non_empty_string(
+        settings.effective_agentic_api_key,
+        settings.effective_hybrid_api_key,
+    )
+    base_url = _first_non_empty_string(
+        settings.effective_agentic_base_url,
+        settings.effective_hybrid_base_url,
+    )
     return LLMConfig(provider=provider, api_token=api_token, base_url=base_url)
 
 
