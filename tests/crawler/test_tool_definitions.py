@@ -1,4 +1,4 @@
-"""Unit tests for src/crawler/tool_definitions.py — 100% coverage, offline."""
+"""Unit tests for src/tools/tool_definitions.py — 100% coverage, offline."""
 
 import json
 import os
@@ -9,12 +9,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 os.environ.setdefault("POSTGRES_URL", "postgresql://u:p@localhost:5432/testdb")
-os.environ.setdefault("EMBEDDING_PROVIDER", "ollama")
-os.environ.setdefault("EMBEDDING_BASE_URL", "http://localhost:11434/api/embeddings")
+os.environ.setdefault("EMBEDDING_BASE_URL", "http://localhost:11434/v1")
+os.environ.setdefault("EMBEDDING_API_KEY", "test")
 os.environ.setdefault("EMBEDDING_MODEL_NAME", "nomic-embed-text")
 os.environ.setdefault("EMBEDDING_DIM", "4")
 
-import src.crawler.tool_definitions as td
+import src.tools.tool_definitions as td
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -80,7 +80,7 @@ class TestCrawlUrl:
     async def test_markdown_mode_dispatches(self):
         ctx = _make_ctx()
         with patch(
-            "src.crawler.tool_definitions.crawl_to_markdown", new_callable=AsyncMock, return_value='{"success": true}'
+            "src.tools.tool_definitions.crawl_to_markdown", new_callable=AsyncMock, return_value='{"success": true}'
         ) as mock_md:
             result = await td.crawl_url(ctx, url="https://x.com", mode="markdown", markdown_variant="fit")
         data = json.loads(result)
@@ -91,7 +91,7 @@ class TestCrawlUrl:
     async def test_deep_mode_dispatches(self):
         ctx = _make_ctx()
         with patch(
-            "src.crawler.tool_definitions.crawl_deep",
+            "src.tools.tool_definitions.crawl_deep",
             new_callable=AsyncMock,
             return_value='{"success": true, "pages_crawled": 1}',
         ) as mock_deep:
@@ -117,6 +117,142 @@ class TestCrawlUrl:
         assert "Invalid mode" in data["error"]
 
 
+class TestSearchWeb:
+    @pytest.mark.asyncio
+    async def test_missing_api_key_returns_error(self):
+        ctx = _make_ctx()
+        with (
+            patch.object(td.settings, "WEB_SEARCH_PROVIDER", "openrouter"),
+            patch.object(td.settings, "WEB_SEARCH_API_KEY", ""),
+            patch.object(td.settings, "WEB_SEARCH_MODEL_NAME", "model"),
+        ):
+            result = await td.search_web(ctx, "query")
+        data = json.loads(result)
+        assert data["success"] is False
+        assert "WEB_SEARCH_API_KEY" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_missing_model_name_returns_error(self):
+        ctx = _make_ctx()
+        with (
+            patch.object(td.settings, "WEB_SEARCH_PROVIDER", "openrouter"),
+            patch.object(td.settings, "WEB_SEARCH_API_KEY", "secret"),
+            patch.object(td.settings, "WEB_SEARCH_MODEL_NAME", ""),
+        ):
+            result = await td.search_web(ctx, "query")
+        data = json.loads(result)
+        assert data["success"] is False
+        assert "WEB_SEARCH_MODEL_NAME" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_successful_search_no_cache(self):
+        ctx = _make_ctx()
+        normalized = {
+            "answer": "Hello",
+            "sources": [{"rank": 1, "url": "https://example.com", "title": "Example", "snippet": "Snippet"}],
+            "search_params": {"engine": "auto", "max_results": 5},
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            "model": "openrouter/test-model",
+        }
+        with (
+            patch.object(td.settings, "WEB_SEARCH_PROVIDER", "openrouter"),
+            patch.object(td.settings, "WEB_SEARCH_API_KEY", "secret"),
+            patch.object(td.settings, "WEB_SEARCH_MODEL_NAME", "model"),
+            patch.object(td.settings, "WEB_SEARCH_CACHE_ENABLED", False),
+            patch("src.tools.tool_definitions.execute_web_search", new=AsyncMock(return_value=normalized)) as mock_exec,
+        ):
+            result = await td.search_web(ctx, "query")
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["answer"] == "Hello"
+        assert data["cached"] is False
+        mock_exec.assert_awaited_once_with("query", "auto", 5, None, None)
+
+    @pytest.mark.asyncio
+    async def test_successful_search_with_cache(self):
+        ctx = _make_ctx()
+        session = MagicMock()
+        normalized = {
+            "query": "query",
+            "answer": "Hello",
+            "sources": [{"rank": 1, "url": "https://example.com", "title": "Example", "snippet": "Snippet"}],
+            "search_params": {"engine": "auto", "max_results": 5},
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            "model": "openrouter/test-model",
+        }
+        with (
+            patch.object(td.settings, "WEB_SEARCH_PROVIDER", "openrouter"),
+            patch.object(td.settings, "WEB_SEARCH_API_KEY", "secret"),
+            patch.object(td.settings, "WEB_SEARCH_MODEL_NAME", "model"),
+            patch.object(td.settings, "WEB_SEARCH_CACHE_ENABLED", True),
+            patch("src.tools.tool_definitions.execute_web_search", new=AsyncMock(return_value=normalized)),
+            patch("src.tools.tool_definitions.cache_web_search_results", new=AsyncMock(return_value=3)) as mock_cache,
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
+        ):
+            result = await td.search_web(ctx, "query")
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["cached"] is True
+        mock_cache.assert_awaited_once_with(session, normalized)
+
+    @pytest.mark.asyncio
+    async def test_cache_failure_does_not_fail_tool(self):
+        ctx = _make_ctx()
+        normalized = {
+            "query": "query",
+            "answer": "Hello",
+            "sources": [],
+            "search_params": {"engine": "auto", "max_results": 5},
+            "usage": {},
+            "model": "openrouter/test-model",
+        }
+        with (
+            patch.object(td.settings, "WEB_SEARCH_PROVIDER", "openrouter"),
+            patch.object(td.settings, "WEB_SEARCH_API_KEY", "secret"),
+            patch.object(td.settings, "WEB_SEARCH_MODEL_NAME", "model"),
+            patch.object(td.settings, "WEB_SEARCH_CACHE_ENABLED", True),
+            patch("src.tools.tool_definitions.execute_web_search", new=AsyncMock(return_value=normalized)),
+            patch(
+                "src.tools.tool_definitions.cache_web_search_results",
+                new=AsyncMock(side_effect=RuntimeError("cache broke")),
+            ),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
+        ):
+            result = await td.search_web(ctx, "query")
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["cached"] is False
+
+    @pytest.mark.asyncio
+    async def test_execute_web_search_exception_returns_error(self):
+        ctx = _make_ctx()
+        with (
+            patch.object(td.settings, "WEB_SEARCH_PROVIDER", "openrouter"),
+            patch.object(td.settings, "WEB_SEARCH_API_KEY", "secret"),
+            patch.object(td.settings, "WEB_SEARCH_MODEL_NAME", "model"),
+            patch("src.tools.tool_definitions.execute_web_search", new=AsyncMock(side_effect=RuntimeError("boom"))),
+        ):
+            result = await td.search_web(ctx, "query")
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"] == "boom"
+
+    @pytest.mark.asyncio
+    async def test_unsupported_provider_returns_error(self):
+        ctx = _make_ctx()
+        with (
+            patch.object(td.settings, "WEB_SEARCH_PROVIDER", "brave"),
+            patch(
+                "src.tools.tool_definitions.execute_web_search",
+                new=AsyncMock(side_effect=ValueError("Unsupported WEB_SEARCH_PROVIDER: brave")),
+            ),
+        ):
+            result = await td.search_web(ctx, "query")
+        data = json.loads(result)
+        assert data["success"] is False
+        assert "Unsupported WEB_SEARCH_PROVIDER" in data["error"]
+
+
 class TestSearchDocumentsV2:
     @pytest.mark.asyncio
     async def test_basic_query_no_reranking(self):
@@ -124,9 +260,9 @@ class TestSearchDocumentsV2:
         raw_results = [{"url": "u", "content": "c", "page_metadata": {"x": 1}, "similarity_score": 0.8}]
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()),
-            patch("src.crawler.tool_definitions.settings", MagicMock(USE_RERANKING=False)),
-            patch("src.crawler.tool_definitions.search_documents", new_callable=AsyncMock, return_value=raw_results),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
+            patch("src.tools.tool_definitions.settings", MagicMock(USE_RERANKING=False)),
+            patch("src.tools.tool_definitions.search_documents", new_callable=AsyncMock, return_value=raw_results),
         ):
             result = await td.search_documents_v2(ctx, "test query")
 
@@ -145,9 +281,9 @@ class TestSearchDocumentsV2:
             return []
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()),
-            patch("src.crawler.tool_definitions.settings", MagicMock(USE_RERANKING=False)),
-            patch("src.crawler.tool_definitions.search_documents", side_effect=fake_search),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
+            patch("src.tools.tool_definitions.settings", MagicMock(USE_RERANKING=False)),
+            patch("src.tools.tool_definitions.search_documents", side_effect=fake_search),
         ):
             await td.search_documents_v2(ctx, "q", source="docs.x.com")
 
@@ -163,9 +299,9 @@ class TestSearchDocumentsV2:
             return []
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()),
-            patch("src.crawler.tool_definitions.settings", MagicMock(USE_RERANKING=False)),
-            patch("src.crawler.tool_definitions.search_documents", side_effect=fake_search),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
+            patch("src.tools.tool_definitions.settings", MagicMock(USE_RERANKING=False)),
+            patch("src.tools.tool_definitions.search_documents", side_effect=fake_search),
         ):
             await td.search_documents_v2(
                 ctx,
@@ -193,9 +329,9 @@ class TestSearchDocumentsV2:
             return []
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()),
-            patch("src.crawler.tool_definitions.settings", MagicMock(USE_RERANKING=False)),
-            patch("src.crawler.tool_definitions.search_documents", side_effect=fake_search),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
+            patch("src.tools.tool_definitions.settings", MagicMock(USE_RERANKING=False)),
+            patch("src.tools.tool_definitions.search_documents", side_effect=fake_search),
         ):
             await td.search_documents_v2(ctx, "q")
 
@@ -211,10 +347,10 @@ class TestSearchDocumentsV2:
         reranked = [raw_results[1], raw_results[0]]
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()),
-            patch("src.crawler.tool_definitions.settings", MagicMock(USE_RERANKING=True)),
-            patch("src.crawler.tool_definitions.search_documents", new_callable=AsyncMock, return_value=raw_results),
-            patch("src.crawler.tool_definitions.rerank_results", return_value=reranked) as mock_rerank,
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
+            patch("src.tools.tool_definitions.settings", MagicMock(USE_RERANKING=True)),
+            patch("src.tools.tool_definitions.search_documents", new_callable=AsyncMock, return_value=raw_results),
+            patch("src.tools.tool_definitions.rerank_results", return_value=reranked) as mock_rerank,
         ):
             result = await td.search_documents_v2(ctx, "q", match_count=2)
 
@@ -244,9 +380,9 @@ class TestSearchDocumentsV2:
         ]
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()),
-            patch("src.crawler.tool_definitions.settings", MagicMock(USE_RERANKING=False)),
-            patch("src.crawler.tool_definitions.search_documents", new_callable=AsyncMock, return_value=raw_results),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
+            patch("src.tools.tool_definitions.settings", MagicMock(USE_RERANKING=False)),
+            patch("src.tools.tool_definitions.search_documents", new_callable=AsyncMock, return_value=raw_results),
         ):
             result = await td.search_documents_v2(ctx, "test query", include_provenance=True)
 
@@ -261,9 +397,9 @@ class TestSearchDocumentsV2:
         ctx = _make_ctx()
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()),
-            patch("src.crawler.tool_definitions.settings", MagicMock(USE_RERANKING=False)),
-            patch("src.crawler.tool_definitions.search_documents", side_effect=RuntimeError("search crash")),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
+            patch("src.tools.tool_definitions.settings", MagicMock(USE_RERANKING=False)),
+            patch("src.tools.tool_definitions.search_documents", side_effect=RuntimeError("search crash")),
         ):
             result = await td.search_documents_v2(ctx, "q")
 
@@ -290,9 +426,9 @@ class TestSearchDocumentsV2:
         ]
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()),
-            patch("src.crawler.tool_definitions.settings", MagicMock(USE_RERANKING=False)),
-            patch("src.crawler.tool_definitions.search_documents", new_callable=AsyncMock, return_value=raw_results),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
+            patch("src.tools.tool_definitions.settings", MagicMock(USE_RERANKING=False)),
+            patch("src.tools.tool_definitions.search_documents", new_callable=AsyncMock, return_value=raw_results),
         ):
             result = await td.search_documents_v2(ctx, "q", fresh_only=True, staleness_threshold=0.5)
 
@@ -314,9 +450,9 @@ class TestSearchDocumentsV2:
         ]
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()),
-            patch("src.crawler.tool_definitions.settings", MagicMock(USE_RERANKING=False)),
-            patch("src.crawler.tool_definitions.search_documents", new_callable=AsyncMock, return_value=raw_results),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
+            patch("src.tools.tool_definitions.settings", MagicMock(USE_RERANKING=False)),
+            patch("src.tools.tool_definitions.search_documents", new_callable=AsyncMock, return_value=raw_results),
         ):
             result = await td.search_documents_v2(
                 ctx,
@@ -346,9 +482,9 @@ class TestSearchCodeExamplesTool:
         ]
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
             patch(
-                "src.crawler.tool_definitions._search_code_examples", new_callable=AsyncMock, return_value=code_results
+                "src.tools.tool_definitions._search_code_examples", new_callable=AsyncMock, return_value=code_results
             ),
         ):
             result = await td.search_code_examples(ctx, "print hello world")
@@ -368,8 +504,8 @@ class TestSearchCodeExamplesTool:
             return []
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()),
-            patch("src.crawler.tool_definitions._search_code_examples", side_effect=fake_search),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
+            patch("src.tools.tool_definitions._search_code_examples", side_effect=fake_search),
         ):
             await td.search_code_examples(ctx, "q", language="rust")
 
@@ -380,8 +516,8 @@ class TestSearchCodeExamplesTool:
         ctx = _make_ctx()
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session()),
-            patch("src.crawler.tool_definitions._search_code_examples", side_effect=RuntimeError("vector fail")),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
+            patch("src.tools.tool_definitions._search_code_examples", side_effect=RuntimeError("vector fail")),
         ):
             result = await td.search_code_examples(ctx, "q")
 
@@ -480,7 +616,7 @@ class TestComputeValueScores:
         session = MagicMock()
         session.exec.side_effect = exec_se
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.compute_value_scores(ctx)
 
         data = json.loads(result)
@@ -513,7 +649,7 @@ class TestComputeValueScores:
         session = MagicMock()
         session.exec.side_effect = exec_se
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.compute_value_scores(ctx, source="target.com")
 
         data = json.loads(result)
@@ -526,7 +662,7 @@ class TestComputeValueScores:
         session = MagicMock()
         session.exec.side_effect = RuntimeError("db crash")
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.compute_value_scores(ctx)
 
         data = json.loads(result)
@@ -563,7 +699,7 @@ class TestPreviewEvictionPlan:
         session = MagicMock()
         session.exec.side_effect = exec_se
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.preview_eviction_plan(ctx, limit=10, dry_run=True)
 
         data = json.loads(result)
@@ -598,8 +734,8 @@ class TestPreviewEvictionPlan:
         session.exec.side_effect = exec_se
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
-            patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts,
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.tombstone_records", return_value=1) as mock_ts,
         ):
             result = await td.preview_eviction_plan(ctx, limit=10, dry_run=False)
 
@@ -633,8 +769,8 @@ class TestPreviewEvictionPlan:
         session.exec.side_effect = exec_se
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
-            patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts,
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.tombstone_records", return_value=1) as mock_ts,
         ):
             result = await td.preview_eviction_plan(ctx, limit=10, dry_run=False)
 
@@ -666,7 +802,7 @@ class TestPreviewEvictionPlan:
         session = MagicMock()
         session.exec.side_effect = exec_se
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.preview_eviction_plan(ctx, source="target.com")
 
         data = json.loads(result)
@@ -679,7 +815,7 @@ class TestPreviewEvictionPlan:
         session = MagicMock()
         session.exec.side_effect = RuntimeError("query fail")
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.preview_eviction_plan(ctx)
 
         data = json.loads(result)
@@ -699,8 +835,8 @@ class TestEnforceStorageBudget:
         session.exec.return_value.first.return_value = None  # no policy → defaults
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
-            patch("src.crawler.tool_definitions._get_db_size_bytes", return_value=1_000_000),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.get_db_size_bytes", return_value=1_000_000),
         ):
             result = await td.enforce_storage_budget(ctx)
 
@@ -738,8 +874,8 @@ class TestEnforceStorageBudget:
         session.exec.side_effect = exec_se
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
-            patch("src.crawler.tool_definitions._get_db_size_bytes", return_value=1_000_000),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.get_db_size_bytes", return_value=1_000_000),
         ):
             result = await td.enforce_storage_budget(ctx)
 
@@ -766,20 +902,20 @@ class TestEnforceStorageBudget:
         session.exec.side_effect = exec_se
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
             patch(
-                "src.crawler.tool_definitions._apply_hard_ttl_delete",
+                "src.tools.tool_definitions._apply_hard_ttl_delete",
                 return_value={"crawled_pages": 0, "code_examples": 0},
             ),
             patch(
-                "src.crawler.tool_definitions._enforce_source_quotas",
+                "src.tools.tool_definitions._enforce_source_quotas",
                 return_value={"quota_evicted": 0, "sources_over_quota": []},
             ),
             patch(
-                "src.crawler.tool_definitions._enforce_table_budgets",
+                "src.tools.tool_definitions._enforce_table_budgets",
                 return_value={"crawled_pages": 0, "code_examples": 0},
             ),
-            patch("src.crawler.tool_definitions._get_db_size_bytes", return_value=1_000_000),
+            patch("src.tools.tool_definitions.get_db_size_bytes", return_value=1_000_000),
         ):
             result = await td.enforce_storage_budget(ctx, force=True)
 
@@ -815,20 +951,20 @@ class TestEnforceStorageBudget:
         session.exec.side_effect = exec_se
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
             patch(
-                "src.crawler.tool_definitions._apply_hard_ttl_delete",
+                "src.tools.tool_definitions._apply_hard_ttl_delete",
                 return_value={"crawled_pages": 0, "code_examples": 0},
             ),
             patch(
-                "src.crawler.tool_definitions._enforce_source_quotas",
+                "src.tools.tool_definitions._enforce_source_quotas",
                 return_value={"quota_evicted": 0, "sources_over_quota": []},
             ),
             patch(
-                "src.crawler.tool_definitions._enforce_table_budgets",
+                "src.tools.tool_definitions._enforce_table_budgets",
                 return_value={"crawled_pages": 0, "code_examples": 0},
             ),
-            patch("src.crawler.tool_definitions._get_db_size_bytes", return_value=1_000_000),
+            patch("src.tools.tool_definitions.get_db_size_bytes", return_value=1_000_000),
         ):
             result = await td.enforce_storage_budget(ctx, force=True)
 
@@ -868,21 +1004,21 @@ class TestEnforceStorageBudget:
         high_usage = int(0.95 * 10.0 * 1024**3)
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
             patch(
-                "src.crawler.tool_definitions._apply_hard_ttl_delete",
+                "src.tools.tool_definitions._apply_hard_ttl_delete",
                 return_value={"crawled_pages": 0, "code_examples": 0},
             ),
             patch(
-                "src.crawler.tool_definitions._enforce_source_quotas",
+                "src.tools.tool_definitions._enforce_source_quotas",
                 return_value={"quota_evicted": 0, "sources_over_quota": []},
             ),
             patch(
-                "src.crawler.tool_definitions._enforce_table_budgets",
+                "src.tools.tool_definitions._enforce_table_budgets",
                 return_value={"crawled_pages": 0, "code_examples": 0},
             ),
-            patch("src.crawler.tool_definitions._get_db_size_bytes", return_value=high_usage),
-            patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts,
+            patch("src.tools.tool_definitions.get_db_size_bytes", return_value=high_usage),
+            patch("src.tools.tool_definitions.tombstone_records", return_value=1) as mock_ts,
         ):
             result = await td.enforce_storage_budget(ctx)
 
@@ -928,9 +1064,9 @@ class TestEnforceStorageBudget:
         over = int(1.05 * 10.0 * 1024**3)
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
-            patch("src.crawler.tool_definitions._get_db_size_bytes", return_value=over),
-            patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts,
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.get_db_size_bytes", return_value=over),
+            patch("src.tools.tool_definitions.tombstone_records", return_value=1) as mock_ts,
         ):
             result = await td.enforce_storage_budget(ctx)
 
@@ -976,9 +1112,9 @@ class TestEnforceStorageBudget:
         over = int(1.05 * 10.0 * 1024**3)
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
-            patch("src.crawler.tool_definitions._get_db_size_bytes", return_value=over),
-            patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts,
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.get_db_size_bytes", return_value=over),
+            patch("src.tools.tool_definitions.tombstone_records", return_value=1) as mock_ts,
         ):
             result = await td.enforce_storage_budget(ctx)
 
@@ -1026,23 +1162,23 @@ class TestEnforceStorageBudget:
         ]
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
-            patch("src.crawler.tool_definitions._get_db_size_bytes", return_value=over),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.get_db_size_bytes", return_value=over),
             patch(
-                "src.crawler.tool_definitions._apply_hard_ttl_delete",
+                "src.tools.tool_definitions._apply_hard_ttl_delete",
                 return_value={"crawled_pages": 0, "code_examples": 0},
             ),
             patch(
-                "src.crawler.tool_definitions._enforce_source_quotas",
+                "src.tools.tool_definitions._enforce_source_quotas",
                 return_value={"quota_evicted": 0, "sources_over_quota": []},
             ),
             patch(
-                "src.crawler.tool_definitions._enforce_table_budgets",
+                "src.tools.tool_definitions._enforce_table_budgets",
                 return_value={"crawled_pages": 0, "code_examples": 0},
             ),
-            patch("src.crawler.tool_definitions._build_active_coverage_maps", return_value=({}, {})),
-            patch("src.crawler.tool_definitions._apply_eviction_safeguards", return_value=selected),
-            patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts,
+            patch("src.tools.tool_definitions._build_active_coverage_maps", return_value=({}, {})),
+            patch("src.tools.tool_definitions._apply_eviction_safeguards", return_value=selected),
+            patch("src.tools.tool_definitions.tombstone_records", return_value=1) as mock_ts,
         ):
             result = await td.enforce_storage_budget(ctx)
 
@@ -1060,8 +1196,8 @@ class TestEnforceStorageBudget:
         session.exec.side_effect = RuntimeError("session failed")
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
-            patch("src.crawler.tool_definitions._get_db_size_bytes", return_value=0),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.get_db_size_bytes", return_value=0),
         ):
             result = await td.enforce_storage_budget(ctx)
 
@@ -1083,7 +1219,7 @@ class TestPinRecords:
         session = MagicMock()
         session.exec.return_value.all.return_value = [rec]
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.pin_records(ctx, record_ids=[1])
 
         data = json.loads(result)
@@ -1098,7 +1234,7 @@ class TestPinRecords:
         session = MagicMock()
         session.exec.return_value.all.return_value = [rec]
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.pin_records(ctx, record_ids=[2], table="code_examples")
 
         data = json.loads(result)
@@ -1119,7 +1255,7 @@ class TestPinRecords:
         session = MagicMock()
         session.exec.side_effect = RuntimeError("pin fail")
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.pin_records(ctx, record_ids=[1])
 
         data = json.loads(result)
@@ -1135,7 +1271,7 @@ class TestUnpinRecords:
         session = MagicMock()
         session.exec.return_value.all.return_value = [rec]
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.unpin_records(ctx, record_ids=[1])
 
         data = json.loads(result)
@@ -1150,7 +1286,7 @@ class TestUnpinRecords:
         session = MagicMock()
         session.exec.return_value.all.return_value = [rec]
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.unpin_records(ctx, record_ids=[3], table="code_examples")
 
         data = json.loads(result)
@@ -1170,7 +1306,7 @@ class TestUnpinRecords:
         session = MagicMock()
         session.exec.side_effect = RuntimeError("unpin fail")
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.unpin_records(ctx, record_ids=[1])
 
         data = json.loads(result)
@@ -1192,8 +1328,8 @@ class TestIndexStorageReport:
         session.exec.return_value.all.return_value = []
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
-            patch("src.crawler.tool_definitions._get_db_size_bytes", return_value=500_000_000),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.get_db_size_bytes", return_value=500_000_000),
         ):
             result = await td.index_storage_report(ctx)
 
@@ -1216,8 +1352,8 @@ class TestIndexStorageReport:
         ]
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
-            patch("src.crawler.tool_definitions._get_db_size_bytes", return_value=500_000_000),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.get_db_size_bytes", return_value=500_000_000),
         ):
             result = await td.index_storage_report(ctx, group_by="source")
 
@@ -1233,8 +1369,8 @@ class TestIndexStorageReport:
         session.exec.side_effect = RuntimeError("storage query fail")
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
-            patch("src.crawler.tool_definitions._get_db_size_bytes", return_value=0),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.get_db_size_bytes", return_value=0),
         ):
             result = await td.index_storage_report(ctx)
 
@@ -1271,7 +1407,7 @@ class TestRestoreTombstonedRecords:
         session = MagicMock()
         session.exec.side_effect = exec_se
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.restore_tombstoned_records(ctx, record_ids=[1])
 
         data = json.loads(result)
@@ -1303,7 +1439,7 @@ class TestRestoreTombstonedRecords:
         session = MagicMock()
         session.exec.side_effect = exec_se
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.restore_tombstoned_records(ctx, record_ids=[2])
 
         data = json.loads(result)
@@ -1334,7 +1470,7 @@ class TestRestoreTombstonedRecords:
         session = MagicMock()
         session.exec.side_effect = exec_se
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.restore_tombstoned_records(ctx, record_ids=[3])
 
         data = json.loads(result)
@@ -1361,7 +1497,7 @@ class TestRestoreTombstonedRecords:
         session = MagicMock()
         session.exec.side_effect = exec_se
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.restore_tombstoned_records(ctx, record_ids=[7])
 
         data = json.loads(result)
@@ -1390,7 +1526,7 @@ class TestRestoreTombstonedRecords:
         session = MagicMock()
         session.exec.side_effect = exec_se
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.restore_tombstoned_records(ctx, record_ids=[10], table="code_examples")
 
         data = json.loads(result)
@@ -1411,7 +1547,7 @@ class TestRestoreTombstonedRecords:
         session = MagicMock()
         session.exec.side_effect = RuntimeError("restore fail")
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.restore_tombstoned_records(ctx, record_ids=[1])
 
         data = json.loads(result)
@@ -1427,8 +1563,8 @@ class TestRecrawlDueSources:
         session.exec.return_value.all.return_value = []
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
-            patch("src.crawler.tool_definitions.crawl_to_markdown", new_callable=AsyncMock) as mock_crawl,
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.crawl_to_markdown", new_callable=AsyncMock) as mock_crawl,
         ):
             result = await td.recrawl_due_sources(ctx)
 
@@ -1450,9 +1586,9 @@ class TestRecrawlDueSources:
         session.execute.return_value.first.return_value = (datetime.now(timezone.utc) - timedelta(hours=5),)
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
             patch(
-                "src.crawler.tool_definitions.crawl_to_markdown",
+                "src.tools.tool_definitions.crawl_to_markdown",
                 new_callable=AsyncMock,
                 return_value=json.dumps({"success": True, "pages_crawled": 1}),
             ) as mock_crawl,
@@ -1477,8 +1613,8 @@ class TestRecrawlDueSources:
         session.execute.return_value.first.return_value = (datetime.now(timezone.utc) - timedelta(hours=2),)
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
-            patch("src.crawler.tool_definitions.crawl_to_markdown", new_callable=AsyncMock) as mock_crawl,
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.crawl_to_markdown", new_callable=AsyncMock) as mock_crawl,
         ):
             result = await td.recrawl_due_sources(ctx)
 
@@ -1504,9 +1640,9 @@ class TestRecrawlDueSources:
         session.execute.return_value.first.return_value = (datetime.now() - timedelta(hours=3),)
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
             patch(
-                "src.crawler.tool_definitions.crawl_to_markdown",
+                "src.tools.tool_definitions.crawl_to_markdown",
                 new_callable=AsyncMock,
                 return_value=json.dumps({"success": True, "pages_crawled": 1}),
             ) as mock_crawl,
@@ -1532,9 +1668,9 @@ class TestRecrawlDueSources:
         session.execute.return_value.first.return_value = None
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
             patch(
-                "src.crawler.tool_definitions.crawl_to_markdown",
+                "src.tools.tool_definitions.crawl_to_markdown",
                 new_callable=AsyncMock,
                 return_value=json.dumps({"success": True, "pages_crawled": 1}),
             ),
@@ -1558,9 +1694,9 @@ class TestRecrawlDueSources:
         session.execute.return_value.first.return_value = (datetime.now(timezone.utc) - timedelta(hours=8),)
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
             patch(
-                "src.crawler.tool_definitions.crawl_to_markdown",
+                "src.tools.tool_definitions.crawl_to_markdown",
                 new_callable=AsyncMock,
                 return_value=json.dumps({"success": False, "error": "crawl failed"}),
             ),
@@ -1579,7 +1715,7 @@ class TestRecrawlDueSources:
         session = MagicMock()
         session.exec.side_effect = RuntimeError("recrawl query failed")
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.recrawl_due_sources(ctx)
 
         data = json.loads(result)
@@ -1598,8 +1734,8 @@ class TestRecrawlDueSources:
         session.exec.return_value.all.return_value = [policy]
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
-            patch("src.crawler.tool_definitions.crawl_to_markdown", new_callable=AsyncMock) as mock_crawl,
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.crawl_to_markdown", new_callable=AsyncMock) as mock_crawl,
         ):
             result = await td.recrawl_due_sources(ctx)
 
@@ -1642,13 +1778,13 @@ class TestRecrawlDueSources:
         session.execute.return_value.first.return_value = (datetime.now(timezone.utc) - timedelta(hours=8),)
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
             patch(
-                "src.crawler.tool_definitions.crawl_to_markdown",
+                "src.tools.tool_definitions.crawl_to_markdown",
                 new_callable=AsyncMock,
                 return_value=json.dumps({"success": False, "error": "HTTP 404 not found"}),
             ),
-            patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts,
+            patch("src.tools.tool_definitions.tombstone_records", return_value=1) as mock_ts,
         ):
             result = await td.recrawl_due_sources(ctx)
 
@@ -1674,9 +1810,9 @@ class TestRecrawlDueSources:
         session.execute.return_value.first.return_value = (datetime.now(timezone.utc) - timedelta(hours=3),)
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
             patch(
-                "src.crawler.tool_definitions.crawl_to_markdown",
+                "src.tools.tool_definitions.crawl_to_markdown",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("network down"),
             ),
@@ -1709,7 +1845,7 @@ class TestPruneStaleContent:
 
         session.exec.side_effect = exec_se
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.prune_stale_content(ctx, force=False)
 
         data = json.loads(result)
@@ -1748,9 +1884,9 @@ class TestPruneStaleContent:
 
         session.exec.side_effect = exec_se
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             with patch(
-                "src.crawler.tool_definitions._apply_hard_ttl_delete",
+                "src.tools.tool_definitions._apply_hard_ttl_delete",
                 return_value={"crawled_pages": 0, "code_examples": 0},
             ):
                 result = await td.prune_stale_content(ctx, force=True)
@@ -1766,7 +1902,7 @@ class TestPruneStaleContent:
         session = MagicMock()
         session.exec.side_effect = RuntimeError("prune failed")
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.prune_stale_content(ctx)
 
         data = json.loads(result)
@@ -1795,7 +1931,7 @@ class TestHardDeleteTombstones:
 
         session.exec.side_effect = exec_se
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.hard_delete_tombstones(ctx)
 
         data = json.loads(result)
@@ -1822,7 +1958,7 @@ class TestHardDeleteTombstones:
 
         session.exec.side_effect = exec_se
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.hard_delete_tombstones(ctx, max_age_hours=24)
 
         data = json.loads(result)
@@ -1837,7 +1973,7 @@ class TestHardDeleteTombstones:
         session = MagicMock()
         session.exec.side_effect = RuntimeError("hard delete failed")
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.hard_delete_tombstones(ctx)
 
         data = json.loads(result)
@@ -1849,7 +1985,7 @@ class TestPhase4StructuredExtraction:
     @pytest.mark.asyncio
     async def test_generate_schema_validates_and_caches(self, tmp_path):
         ctx = _make_ctx()
-        with patch("src.crawler.tool_definitions._SCHEMA_CACHE_DIR", tmp_path):
+        with patch("src.tools.tool_definitions._SCHEMA_CACHE_DIR", tmp_path):
             result = await td.generate_extraction_schema(
                 ctx,
                 sample_html="<html><head><title>X</title></head><body><h1>H</h1><p>P</p><a href='https://x.com'>L</a></body></html>",
@@ -1933,7 +2069,7 @@ class TestPhase4StructuredExtraction:
     async def test_extract_structured_json_normalized_output_from_crawl_payload(self):
         ctx = _make_ctx()
         with patch(
-            "src.crawler.tool_definitions.crawl_to_markdown",
+            "src.tools.tool_definitions.crawl_to_markdown",
             new_callable=AsyncMock,
             return_value=json.dumps({"success": True, "extraction_result": [{"title": "Example"}]}),
         ) as mock_crawl:
@@ -1982,7 +2118,7 @@ class TestPhase4StructuredExtraction:
     async def test_index_structured_content_forwards_projection_metadata(self):
         ctx = _make_ctx()
         with patch(
-            "src.crawler.tool_definitions.index_markdown",
+            "src.tools.tool_definitions.index_markdown",
             new_callable=AsyncMock,
             return_value=json.dumps({"success": True, "chunks_stored": 1}),
         ) as mock_index:
@@ -2004,7 +2140,7 @@ class TestPhase4StructuredExtraction:
     async def test_extract_structured_json_returns_upstream_failure_payload(self):
         ctx = _make_ctx()
         with patch(
-            "src.crawler.tool_definitions.crawl_to_markdown",
+            "src.tools.tool_definitions.crawl_to_markdown",
             new_callable=AsyncMock,
             return_value=json.dumps({"success": False, "error": "upstream crawl failed"}),
         ):
@@ -2030,7 +2166,7 @@ class TestPhase4StructuredExtraction:
 
     @pytest.mark.asyncio
     async def test_cache_schema_name_without_extension_gets_json_suffix(self, tmp_path):
-        with patch("src.crawler.tool_definitions._SCHEMA_CACHE_DIR", tmp_path):
+        with patch("src.tools.tool_definitions._SCHEMA_CACHE_DIR", tmp_path):
             cache_path = td._cache_generated_schema(
                 schema={"fields": [{"name": "title", "selector": "h1", "type": "text"}]},
                 sample_html="<h1>x</h1>",
@@ -2275,9 +2411,9 @@ class TestPhase9FreshnessAndSafeguards:
         session.exec.return_value.all.return_value = [r1]
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
             patch(
-                "src.crawler.tool_definitions._run_selective_reembed", new_callable=AsyncMock, return_value=1
+                "src.tools.tool_definitions._run_selective_reembed", new_callable=AsyncMock, return_value=1
             ) as mock_reembed,
         ):
             result = await td.detect_content_drift(ctx, trigger_selective_reembed=True)
@@ -2307,7 +2443,7 @@ class TestPhase9FreshnessAndSafeguards:
             return m
 
         session.exec.side_effect = exec_se
-        with patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts:
+        with patch("src.tools.tool_definitions.tombstone_records", return_value=1) as mock_ts:
             result = td._enforce_source_quotas(session, {"docs.example.com": policy})
 
         assert result["quota_evicted"] == 1
@@ -2370,7 +2506,7 @@ class TestPhase9FreshnessAndSafeguards:
         policy = MagicMock()
         policy.max_source_size_mb = 1
 
-        with patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts:
+        with patch("src.tools.tool_definitions.tombstone_records", return_value=1) as mock_ts:
             result = td._enforce_source_quotas(session, {"docs.example.com": policy})
 
         assert result["quota_evicted"] >= 1
@@ -2396,7 +2532,7 @@ class TestPhase9FreshnessAndSafeguards:
             return m
 
         session.exec.side_effect = exec_se
-        with patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts:
+        with patch("src.tools.tool_definitions.tombstone_records", return_value=1) as mock_ts:
             result = td._enforce_table_budgets(
                 session,
                 max_crawled_pages_mb=1,
@@ -2420,7 +2556,7 @@ class TestPhase9FreshnessAndSafeguards:
             return m
 
         session.exec.side_effect = exec_se
-        with patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts:
+        with patch("src.tools.tool_definitions.tombstone_records", return_value=1) as mock_ts:
             result = td._enforce_table_budgets(session, max_crawled_pages_mb=100, max_code_examples_mb=100)
 
         assert result["crawled_pages"] == 0
@@ -2443,7 +2579,7 @@ class TestPhase9FreshnessAndSafeguards:
             return m
 
         session.exec.side_effect = exec_se
-        with patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts:
+        with patch("src.tools.tool_definitions.tombstone_records", return_value=1) as mock_ts:
             result = td._enforce_table_budgets(session, max_crawled_pages_mb=1, max_code_examples_mb=None)
 
         assert result["crawled_pages"] == 1
@@ -2526,7 +2662,7 @@ class TestPhase9FreshnessAndSafeguards:
 
         session.exec.side_effect = exec_se
 
-        with patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts:
+        with patch("src.tools.tool_definitions.tombstone_records", return_value=1) as mock_ts:
             result = td._retire_source_duplicates_and_superseded(session, "docs.example.com")
 
         assert result["duplicate_retired"] == 1
@@ -2563,7 +2699,7 @@ class TestPhase9FreshnessAndSafeguards:
 
         session.exec.side_effect = exec_se
 
-        with patch("src.crawler.tool_definitions.tombstone_records", return_value=1) as mock_ts:
+        with patch("src.tools.tool_definitions.tombstone_records", return_value=1) as mock_ts:
             result = td._retire_source_duplicates_and_superseded(session, "docs.example.com")
 
         assert result["duplicate_retired"] == 1
@@ -2578,7 +2714,7 @@ class TestPhase9FreshnessAndSafeguards:
         session = MagicMock()
         session.exec.return_value.all.return_value = [row]
 
-        with patch("src.crawler.tool_definitions.create_embedding", new_callable=AsyncMock, return_value=[0.1, 0.2]):
+        with patch("src.tools.tool_definitions.create_embedding", new_callable=AsyncMock, return_value=[0.1, 0.2]):
             updated = await td._run_selective_reembed(session, [1])
 
         assert updated == 1
@@ -2606,21 +2742,21 @@ class TestNewBudgetActionReporting:
         session.exec.return_value.first.return_value = None
 
         with (
-            patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)),
-            patch("src.crawler.tool_definitions._get_db_size_bytes", return_value=int(0.95 * 10.0 * 1024**3)),
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)),
+            patch("src.tools.tool_definitions.get_db_size_bytes", return_value=int(0.95 * 10.0 * 1024**3)),
             patch(
-                "src.crawler.tool_definitions._apply_hard_ttl_delete",
+                "src.tools.tool_definitions._apply_hard_ttl_delete",
                 return_value={"crawled_pages": 1, "code_examples": 0},
             ),
             patch(
-                "src.crawler.tool_definitions._enforce_source_quotas",
+                "src.tools.tool_definitions._enforce_source_quotas",
                 return_value={"quota_evicted": 2, "sources_over_quota": ["example.com"]},
             ),
             patch(
-                "src.crawler.tool_definitions._enforce_table_budgets",
+                "src.tools.tool_definitions._enforce_table_budgets",
                 return_value={"crawled_pages": 1, "code_examples": 1},
             ),
-            patch("src.crawler.tool_definitions.tombstone_records", return_value=0),
+            patch("src.tools.tool_definitions.tombstone_records", return_value=0),
         ):
             result = await td.enforce_storage_budget(ctx, force=True)
 
@@ -2650,7 +2786,7 @@ class TestRetrievalScopeWrappers:
     async def test_search_raw_markdown_forwards_variant(self):
         ctx = _make_ctx()
         with patch(
-            "src.crawler.tool_definitions.search_documents_v2", new_callable=AsyncMock, return_value='{"success": true}'
+            "src.tools.tool_definitions.search_documents_v2", new_callable=AsyncMock, return_value='{"success": true}'
         ) as mock_search:
             result = await td.search_raw_markdown(ctx, query="q", source="docs.example.com")
         data = json.loads(result)
@@ -2661,7 +2797,7 @@ class TestRetrievalScopeWrappers:
     async def test_search_fit_markdown_forwards_variant(self):
         ctx = _make_ctx()
         with patch(
-            "src.crawler.tool_definitions.search_documents_v2", new_callable=AsyncMock, return_value='{"success": true}'
+            "src.tools.tool_definitions.search_documents_v2", new_callable=AsyncMock, return_value='{"success": true}'
         ) as mock_search:
             result = await td.search_fit_markdown(ctx, query="q", source="docs.example.com")
         data = json.loads(result)
@@ -2681,7 +2817,7 @@ class TestDetectContentDrift:
         session = MagicMock()
         session.exec.return_value.all.return_value = [r1, r2, r3]
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.detect_content_drift(ctx)
 
         data = json.loads(result)
@@ -2701,7 +2837,7 @@ class TestDetectContentDrift:
         session = MagicMock()
         session.exec.return_value.all.return_value = [include, exclude]
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.detect_content_drift(ctx, source="a.com")
 
         data = json.loads(result)
@@ -2714,7 +2850,7 @@ class TestDetectContentDrift:
         session = MagicMock()
         session.exec.side_effect = RuntimeError("drift fail")
 
-        with patch("src.crawler.tool_definitions.get_session", side_effect=_make_get_session(session)):
+        with patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session(session)):
             result = await td.detect_content_drift(ctx)
 
         data = json.loads(result)
@@ -2933,7 +3069,7 @@ class TestStoreIndexMarkdownPayload:
             "db_chunks": [],
             "db_fulldocs": [],
         }
-        with patch("src.crawler.tool_definitions.add_documents_to_db", new=AsyncMock(return_value=0)):
+        with patch("src.tools.tool_definitions.add_documents_to_db", new=AsyncMock(return_value=0)):
             stored, chunk_id = await td._store_index_markdown_payload(session, "https://x.com", payload)
         assert stored == 0
         assert chunk_id is None
@@ -3032,7 +3168,7 @@ class TestSourceRecordIds:
         row.id = "bad"
         row.page_metadata = {"source": "src1"}
         session.exec.return_value.all.return_value = [row]
-        with patch("src.crawler.tool_definitions.select"):
+        with patch("src.tools.tool_definitions.select"):
             result = td._source_record_ids(session, MagicMock(), "src1")
         assert result == []
 
@@ -3042,7 +3178,7 @@ class TestSourceRecordIds:
         row.id = 42
         row.page_metadata = {"source": "other_source"}
         session.exec.return_value.all.return_value = [row]
-        with patch("src.crawler.tool_definitions.select"):
+        with patch("src.tools.tool_definitions.select"):
             result = td._source_record_ids(session, MagicMock(), "src1")
         assert result == []
 

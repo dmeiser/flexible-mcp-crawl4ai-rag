@@ -1,6 +1,6 @@
 """
 Utility script to re-embed all stored documents with the current embedding model.
-Run with: uv run python -m src.reembed_documents
+Run with: uv run python -m src.tools.reembed_documents
 """
 
 import asyncio
@@ -8,14 +8,16 @@ import logging
 
 from sqlmodel import select
 
-from .utils import CodeExample, CrawledPage, create_embedding, get_session, settings
+from .config import settings
+from .models import CodeExample, CrawledPage, get_session
+from .utils import create_embedding
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 async def reembed_all() -> None:
-    logger.info(f"Re-embedding with provider={settings.EMBEDDING_PROVIDER}, model={_current_model()}")
+    logger.info(f"Re-embedding with model={_current_model()}")
 
     with next(get_session()) as session:
         pages = session.exec(select(CrawledPage)).all()

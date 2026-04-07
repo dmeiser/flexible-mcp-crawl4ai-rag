@@ -5,12 +5,12 @@ import os
 import pytest
 
 os.environ.setdefault("POSTGRES_URL", "postgresql://u:p@localhost:5432/testdb")
-os.environ.setdefault("EMBEDDING_PROVIDER", "ollama")
-os.environ.setdefault("EMBEDDING_BASE_URL", "http://localhost:11434/api/embeddings")
+os.environ.setdefault("EMBEDDING_BASE_URL", "http://localhost:11434/v1")
+os.environ.setdefault("EMBEDDING_API_KEY", "test")
 os.environ.setdefault("EMBEDDING_MODEL_NAME", "nomic-embed-text")
 os.environ.setdefault("EMBEDDING_DIM", "4")
 
-from src.crawler import url_scorers
+from src.services import url_scorers
 
 
 class TestUrlScorerFactory:

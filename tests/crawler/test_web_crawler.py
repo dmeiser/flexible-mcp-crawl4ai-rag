@@ -1,4 +1,4 @@
-"""Unit tests for src/crawler/web_crawler.py — 100% coverage, all offline."""
+"""Unit tests for src/services/web_crawler.py — 100% coverage, all offline."""
 
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -6,12 +6,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 os.environ.setdefault("POSTGRES_URL", "postgresql://u:p@localhost:5432/testdb")
-os.environ.setdefault("EMBEDDING_PROVIDER", "ollama")
-os.environ.setdefault("EMBEDDING_BASE_URL", "http://localhost:11434/api/embeddings")
+os.environ.setdefault("EMBEDDING_BASE_URL", "http://localhost:11434/v1")
+os.environ.setdefault("EMBEDDING_API_KEY", "test")
 os.environ.setdefault("EMBEDDING_MODEL_NAME", "nomic-embed-text")
 os.environ.setdefault("EMBEDDING_DIM", "4")
 
-from src.crawler.web_crawler import (
+from src.config import ChunkStrategy
+from src.services.web_crawler import (
     _collect_urls_to_crawl,
     _fixed_char_chunking,
     _paragraph_chunking,
@@ -27,7 +28,6 @@ from src.crawler.web_crawler import (
     is_txt,
     parse_sitemap,
 )
-from src.utils import ChunkStrategy
 
 # ---------------------------------------------------------------------------
 # Tests: is_sitemap / is_txt
@@ -74,7 +74,7 @@ class TestParseSitemap:
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_client.get = AsyncMock(return_value=mock_resp)
 
-        with patch("src.crawler.web_crawler.httpx.AsyncClient", return_value=mock_client):
+        with patch("src.services.web_crawler.httpx.AsyncClient", return_value=mock_client):
             result = await parse_sitemap("https://example.com/sitemap.xml")
         assert result == ["https://example.com/a", "https://example.com/b"]
 
@@ -89,7 +89,7 @@ class TestParseSitemap:
             side_effect=httpx.HTTPStatusError("404", request=MagicMock(), response=MagicMock(status_code=404))
         )
 
-        with patch("src.crawler.web_crawler.httpx.AsyncClient", return_value=mock_client):
+        with patch("src.services.web_crawler.httpx.AsyncClient", return_value=mock_client):
             result = await parse_sitemap("https://example.com/sitemap.xml")
         assert result == []
 
@@ -102,7 +102,7 @@ class TestParseSitemap:
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_client.get = AsyncMock(side_effect=httpx.RequestError("connection failed"))
 
-        with patch("src.crawler.web_crawler.httpx.AsyncClient", return_value=mock_client):
+        with patch("src.services.web_crawler.httpx.AsyncClient", return_value=mock_client):
             result = await parse_sitemap("https://example.com/sitemap.xml")
         assert result == []
 
@@ -117,7 +117,7 @@ class TestParseSitemap:
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_client.get = AsyncMock(return_value=mock_resp)
 
-        with patch("src.crawler.web_crawler.httpx.AsyncClient", return_value=mock_client):
+        with patch("src.services.web_crawler.httpx.AsyncClient", return_value=mock_client):
             result = await parse_sitemap("https://example.com/sitemap.xml")
         assert result == []
 
@@ -128,7 +128,7 @@ class TestParseSitemap:
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_client.get = AsyncMock(side_effect=RuntimeError("unexpected"))
 
-        with patch("src.crawler.web_crawler.httpx.AsyncClient", return_value=mock_client):
+        with patch("src.services.web_crawler.httpx.AsyncClient", return_value=mock_client):
             result = await parse_sitemap("https://example.com/sitemap.xml")
         assert result == []
 
@@ -150,7 +150,7 @@ class TestParseSitemap:
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_client.get = AsyncMock(return_value=mock_resp)
 
-        with patch("src.crawler.web_crawler.httpx.AsyncClient", return_value=mock_client):
+        with patch("src.services.web_crawler.httpx.AsyncClient", return_value=mock_client):
             result = await parse_sitemap("https://example.com/sitemap.xml")
         assert result == ["https://example.com/a"]
 
@@ -260,18 +260,18 @@ class TestSentenceChunking:
 
     def test_nltk_failure_falls_back_to_paragraph(self):
         text = "Hello world. Goodbye."
-        with patch("src.crawler.web_crawler.nltk.sent_tokenize", side_effect=Exception("NLTK failed")):
+        with patch("src.services.web_crawler.nltk.sent_tokenize", side_effect=Exception("NLTK failed")):
             result = _sentence_chunking(text, 500, 0)
         # Falls back to paragraph chunking — should still produce a result
         assert len(result) >= 1
 
     def test_no_sentences_returns_empty(self):
-        with patch("src.crawler.web_crawler.nltk.sent_tokenize", return_value=[]):
+        with patch("src.services.web_crawler.nltk.sent_tokenize", return_value=[]):
             result = _sentence_chunking("some text", 100, 0)
         assert result == []
 
     def test_whitespace_chunks_filtered(self):
-        with patch("src.crawler.web_crawler.nltk.sent_tokenize", return_value=["  ", "Real sentence."]):
+        with patch("src.services.web_crawler.nltk.sent_tokenize", return_value=["  ", "Real sentence."]):
             result = _sentence_chunking("text", 100, 0)
         # "  " alone becomes a chunk "  " which is filtered
         assert all(c.strip() for c in result)
@@ -290,7 +290,7 @@ class TestChunkTextAccordingToSettings:
 
     @pytest.mark.asyncio
     async def test_fixed_strategy(self):
-        with patch("src.crawler.web_crawler.settings") as mock_settings:
+        with patch("src.services.web_crawler.settings") as mock_settings:
             mock_settings.CHUNK_SIZE = 10
             mock_settings.CHUNK_OVERLAP = 0
             mock_settings.CHUNK_STRATEGY = ChunkStrategy.FIXED
@@ -300,8 +300,8 @@ class TestChunkTextAccordingToSettings:
     @pytest.mark.asyncio
     async def test_sentence_strategy(self):
         with (
-            patch("src.crawler.web_crawler.settings") as mock_settings,
-            patch("src.crawler.web_crawler.nltk.sent_tokenize", return_value=["Hello.", "World."]),
+            patch("src.services.web_crawler.settings") as mock_settings,
+            patch("src.services.web_crawler.nltk.sent_tokenize", return_value=["Hello.", "World."]),
         ):
             mock_settings.CHUNK_SIZE = 500
             mock_settings.CHUNK_OVERLAP = 0
@@ -311,7 +311,7 @@ class TestChunkTextAccordingToSettings:
 
     @pytest.mark.asyncio
     async def test_paragraph_strategy(self):
-        with patch("src.crawler.web_crawler.settings") as mock_settings:
+        with patch("src.services.web_crawler.settings") as mock_settings:
             mock_settings.CHUNK_SIZE = 200
             mock_settings.CHUNK_OVERLAP = 0
             mock_settings.CHUNK_STRATEGY = ChunkStrategy.PARAGRAPH
@@ -320,7 +320,7 @@ class TestChunkTextAccordingToSettings:
 
     @pytest.mark.asyncio
     async def test_semantic_strategy_falls_back_to_paragraph(self):
-        with patch("src.crawler.web_crawler.settings") as mock_settings:
+        with patch("src.services.web_crawler.settings") as mock_settings:
             mock_settings.CHUNK_SIZE = 200
             mock_settings.CHUNK_OVERLAP = 0
             mock_settings.CHUNK_STRATEGY = ChunkStrategy.SEMANTIC  # not implemented, falls back
@@ -414,7 +414,7 @@ class TestCrawlBatch:
         mock_crawler = AsyncMock()
         mock_crawler.arun_many = AsyncMock(return_value=[mock_r1, mock_r2])
 
-        with patch("src.crawler.web_crawler.MemoryAdaptiveDispatcher"):
+        with patch("src.services.web_crawler.MemoryAdaptiveDispatcher"):
             results = await crawl_batch(mock_crawler, ["https://a.com", "https://b.com"])
         assert len(results) == 2
 
@@ -434,7 +434,7 @@ class TestCrawlBatch:
         mock_crawler = AsyncMock()
         mock_crawler.arun_many = AsyncMock(return_value=[mock_r1, mock_r2])
 
-        with patch("src.crawler.web_crawler.MemoryAdaptiveDispatcher"):
+        with patch("src.services.web_crawler.MemoryAdaptiveDispatcher"):
             results = await crawl_batch(mock_crawler, ["https://a.com", "https://b.com"])
         assert len(results) == 1
         assert results[0]["url"] == "https://a.com"
@@ -449,7 +449,7 @@ class TestCrawlBatch:
         mock_crawler = AsyncMock()
         mock_crawler.arun_many = AsyncMock(return_value=[mock_r])
 
-        with patch("src.crawler.web_crawler.MemoryAdaptiveDispatcher"):
+        with patch("src.services.web_crawler.MemoryAdaptiveDispatcher"):
             results = await crawl_batch(mock_crawler, ["https://x.com"])
         assert results == []
 
@@ -478,7 +478,7 @@ class TestCrawlRecursiveInternalLinks:
         mock_crawler = AsyncMock()
         mock_crawler.arun_many = AsyncMock(return_value=[mock_result])
 
-        with patch("src.crawler.web_crawler.MemoryAdaptiveDispatcher"):
+        with patch("src.services.web_crawler.MemoryAdaptiveDispatcher"):
             results = await crawl_recursive_internal_links(mock_crawler, ["https://example.com"], max_depth=0)
         # crawl_batch called once; arun_many called once for batch; at depth 0 no recursion
         assert len(results) == 1
@@ -512,9 +512,9 @@ class TestCrawlRecursiveInternalLinks:
         )
 
         with (
-            patch("src.crawler.web_crawler.MemoryAdaptiveDispatcher"),
+            patch("src.services.web_crawler.MemoryAdaptiveDispatcher"),
             patch(
-                "src.crawler.web_crawler.crawl_batch",
+                "src.services.web_crawler.crawl_batch",
                 new_callable=AsyncMock,
                 return_value=[{"url": "https://example.com/docs/", "markdown": "content"}],
             ),
@@ -555,7 +555,7 @@ class TestCrawlRecursiveInternalLinks:
             ]
         )
 
-        with patch("src.crawler.web_crawler.MemoryAdaptiveDispatcher"):
+        with patch("src.services.web_crawler.MemoryAdaptiveDispatcher"):
             results = await crawl_recursive_internal_links(
                 mock_crawler,
                 ["https://example.com"],
@@ -589,7 +589,7 @@ class TestCrawlRecursiveInternalLinks:
             ]
         )
 
-        with patch("src.crawler.web_crawler.MemoryAdaptiveDispatcher"):
+        with patch("src.services.web_crawler.MemoryAdaptiveDispatcher"):
             results = await crawl_recursive_internal_links(
                 mock_crawler,
                 ["https://example.com"],
@@ -618,7 +618,7 @@ class TestCrawlRecursiveInternalLinks:
             ]
         )
 
-        with patch("src.crawler.web_crawler.MemoryAdaptiveDispatcher"):
+        with patch("src.services.web_crawler.MemoryAdaptiveDispatcher"):
             results = await crawl_recursive_internal_links(
                 mock_crawler,
                 ["https://example.com"],
@@ -647,7 +647,7 @@ class TestCrawlRecursiveInternalLinks:
             ]
         )
 
-        with patch("src.crawler.web_crawler.MemoryAdaptiveDispatcher"):
+        with patch("src.services.web_crawler.MemoryAdaptiveDispatcher"):
             results = await crawl_recursive_internal_links(
                 mock_crawler,
                 ["https://example.com"],
@@ -684,7 +684,7 @@ class TestCrawlRecursiveInternalLinks:
             ]
         )
 
-        with patch("src.crawler.web_crawler.MemoryAdaptiveDispatcher"):
+        with patch("src.services.web_crawler.MemoryAdaptiveDispatcher"):
             results = await crawl_recursive_internal_links(
                 mock_crawler,
                 ["https://example.com"],
@@ -698,7 +698,7 @@ class TestCrawlRecursiveInternalLinks:
         """When url_pattern rejects every start URL urls_to_crawl is empty → continue → no crawl."""
         mock_crawler = AsyncMock()
 
-        with patch("src.crawler.web_crawler.MemoryAdaptiveDispatcher"):
+        with patch("src.services.web_crawler.MemoryAdaptiveDispatcher"):
             results = await crawl_recursive_internal_links(
                 mock_crawler,
                 ["https://example.com/blog/post"],

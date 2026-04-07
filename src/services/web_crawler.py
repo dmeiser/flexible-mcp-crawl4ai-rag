@@ -10,7 +10,7 @@ import httpx
 import nltk
 from crawl4ai import AsyncWebCrawler, CacheMode, CrawlerRunConfig, MemoryAdaptiveDispatcher
 
-from ..utils import ChunkStrategy, settings
+from src.config import ChunkStrategy, settings
 
 logger = logging.getLogger(__name__)
 

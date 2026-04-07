@@ -8,7 +8,9 @@ from urllib.parse import urlparse
 
 from sqlmodel import Session
 
-from ..utils import add_documents_to_db, extract_link_references
+from src.services.content_extraction import extract_link_references
+from src.services.document_storage_service import add_documents_to_db
+
 from .metadata_extractor import extract_section_info
 from .web_crawler import chunk_text_according_to_settings
 

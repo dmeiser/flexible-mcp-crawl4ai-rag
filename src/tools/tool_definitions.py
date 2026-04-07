@@ -40,46 +40,65 @@ from fastmcp import Context
 from sqlalchemy import text as _sql_text
 from sqlmodel import Session, select
 
-from src.utils import (
-    CodeExample,
-    CrawledPage,
-    MarkdownIndexPolicy,
-    SourcePolicy,
-    StoragePolicy,
-    _get_db_size_bytes,
+from src.config import MarkdownIndexPolicy, settings
+from src.models import CodeExample, CrawledPage, SourcePolicy, StoragePolicy, get_session
+from src.services.content_extraction import extract_code_blocks, extract_link_references
+from src.services.document_storage_service import (
     add_code_examples_to_db,
     add_documents_to_db,
-    compute_staleness_score,
-    compute_value_score,
-    create_embedding,
-    extract_code_blocks,
-    extract_link_references,
-    get_session,
-    rerank_results,
+    upsert_source,
 )
-from src.utils import search_code_examples as _search_code_examples
-from src.utils import search_documents as _search_documents_core
-from src.utils import (
-    settings,
-    tombstone_records,
-)
-
-from .metadata_extractor import (
+from src.services.ingestion import store_crawled_documents
+from src.services.metadata_extractor import (
     extract_link_graph,
     extract_media_metadata,
     extract_section_info,
 )
-from .postgres_client import store_crawled_documents
-from .url_scorers import build_url_scorer, get_supported_scorer_types
-from .web_crawler import (
+from src.services.reranking_service import rerank_results
+from src.services.scoring_service import compute_staleness_score, compute_value_score
+from src.services.search_service import search_code_examples as _search_code_examples
+from src.services.search_service import search_documents
+from src.services.tombstone_service import get_db_size_bytes, tombstone_records
+from src.services.url_scorers import build_url_scorer, get_supported_scorer_types
+from src.services.web_crawler import (
     chunk_text_according_to_settings,
     crawl_recursive_internal_links,
 )
+from src.services.web_search_service import cache_web_search_results as _service_cache_web_search_results
+from src.services.web_search_service import execute_web_search as _service_execute_web_search
+from src.utils import _openai_compatible_endpoint, create_embedding
 
 logger = logging.getLogger(__name__)
 
-# Backward-compatible symbol name used by existing tests/patches.
-search_documents = _search_documents_core
+
+async def execute_web_search(
+    query: str,
+    engine: str = "auto",
+    max_results: int = 5,
+    allowed_domains: Optional[List[str]] = None,
+    excluded_domains: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    return await _service_execute_web_search(
+        settings=settings,
+        endpoint_factory=_openai_compatible_endpoint,
+        query=query,
+        engine=engine,
+        max_results=max_results,
+        allowed_domains=allowed_domains,
+        excluded_domains=excluded_domains,
+    )
+
+
+async def cache_web_search_results(session: Session, result: Dict[str, Any]) -> int:
+    return await _service_cache_web_search_results(
+        session=session,
+        result=result,
+        settings=settings,
+        upsert_source_fn=upsert_source,
+        crawled_page_cls=CrawledPage,
+        content_class_text="text",
+        embedding_dim=int(settings.EMBEDDING_DIM),
+    )
 
 
 _ALLOWED_RUN_CONFIG_FIELDS = {
@@ -5773,7 +5792,7 @@ async def search_structured_content(
         if source:
             filter_meta["source"] = source
         with next(get_session()) as session:
-            results = await _search_documents_core(
+            results = await search_documents(
                 session,
                 query,
                 match_count=match_count,
@@ -5892,6 +5911,86 @@ async def search_fit_markdown(
         fresh_only=fresh_only,
         recency_bias=recency_bias,
         include_provenance=include_provenance,
+    )
+
+
+async def search_web(
+    ctx: Context,
+    query: str,
+    engine: str = "auto",
+    max_results: int = 5,
+    allowed_domains: Optional[List[str]] = None,
+    excluded_domains: Optional[List[str]] = None,
+) -> str:
+    """Search the live web via OpenRouter web search.
+
+    Only available when USE_WEB_SEARCH=true and valid WEB_SEARCH_* settings are configured.
+    """
+    _ = ctx
+    config_error = _web_search_config_error(query)
+    if config_error is not None:
+        return config_error
+
+    try:
+        result = await execute_web_search(query, engine, max_results, allowed_domains, excluded_domains)
+        cached = await _maybe_cache_web_search_result(result)
+        return _search_web_success_payload(query, result, cached)
+    except Exception as exc:
+        logger.error(f"search_web: {exc}", exc_info=True)
+        return json.dumps({"success": False, "query": query, "error": str(exc)}, indent=2)
+
+
+def _web_search_provider_value() -> str:
+    return str(getattr(settings.WEB_SEARCH_PROVIDER, "value", settings.WEB_SEARCH_PROVIDER))
+
+
+def _web_search_config_error(query: str) -> Optional[str]:
+    provider = _web_search_provider_value()
+    if provider != "openrouter":
+        return None
+    if not settings.WEB_SEARCH_API_KEY:
+        return _search_web_error_payload(
+            query,
+            "WEB_SEARCH_API_KEY is not configured for WEB_SEARCH_PROVIDER=openrouter. "
+            "Set WEB_SEARCH_API_KEY and WEB_SEARCH_MODEL_NAME.",
+        )
+    if not settings.WEB_SEARCH_MODEL_NAME:
+        return _search_web_error_payload(
+            query,
+            "WEB_SEARCH_MODEL_NAME is not configured for WEB_SEARCH_PROVIDER=openrouter. "
+            "Set WEB_SEARCH_API_KEY and WEB_SEARCH_MODEL_NAME.",
+        )
+    return None
+
+
+def _search_web_error_payload(query: str, error: str) -> str:
+    return json.dumps({"success": False, "query": query, "error": error}, indent=2)
+
+
+async def _maybe_cache_web_search_result(result: Dict[str, Any]) -> bool:
+    if not settings.WEB_SEARCH_CACHE_ENABLED:
+        return False
+    try:
+        with next(get_session()) as session:
+            return await cache_web_search_results(session, result) > 0
+    except Exception as cache_exc:
+        logger.warning(f"search_web cache write failed: {cache_exc}", exc_info=True)
+        return False
+
+
+def _search_web_success_payload(query: str, result: Dict[str, Any], cached: bool) -> str:
+    return json.dumps(
+        {
+            "success": True,
+            "query": query,
+            "answer": result.get("answer", ""),
+            "sources": result.get("sources", []),
+            "search_params": result.get("search_params", {}),
+            "usage": result.get("usage", {}),
+            "model": result.get("model", ""),
+            "cached": cached,
+        },
+        indent=2,
     )
 
 
@@ -6167,7 +6266,7 @@ def _table_storage_stats(session: Session, table_name: str) -> Dict[str, Any]:
 
 
 def _storage_report_base(session: Session) -> Dict[str, Any]:
-    db_size = _get_db_size_bytes(session)
+    db_size = get_db_size_bytes(session)
     policy = session.exec(select(StoragePolicy)).first()
     max_gb = policy.max_db_size_gb if policy else 10.0
     max_bytes = int(max_gb * 1024**3)
@@ -6424,7 +6523,7 @@ async def enforce_storage_budget(
             runtime_values = _storage_runtime_values(_storage_policy_values(policy))
 
             max_bytes = int(runtime_values["max_bytes"])
-            db_size_bytes = _get_db_size_bytes(session)
+            db_size_bytes = get_db_size_bytes(session)
             usage_ratio = db_size_bytes / max_bytes if max_bytes > 0 else 0.0
             warn_pct = float(runtime_values["warn_pct"])
             high_pct = float(runtime_values["high_pct"])

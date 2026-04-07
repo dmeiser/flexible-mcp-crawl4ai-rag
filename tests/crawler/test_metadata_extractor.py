@@ -1,6 +1,6 @@
-"""Unit tests for src/crawler/metadata_extractor.py — 100% coverage, all offline."""
+"""Unit tests for src/services/metadata_extractor.py — 100% coverage, all offline."""
 
-from src.crawler.metadata_extractor import (
+from src.services.metadata_extractor import (
     extract_link_graph,
     extract_media_metadata,
     extract_section_info,

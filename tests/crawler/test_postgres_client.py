@@ -1,4 +1,4 @@
-"""Unit tests for src/crawler/postgres_client.py — 100% coverage, offline."""
+"""Unit tests for src/services/ingestion.py — 100% coverage, offline."""
 
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -6,12 +6,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 os.environ.setdefault("POSTGRES_URL", "postgresql://u:p@localhost:5432/testdb")
-os.environ.setdefault("EMBEDDING_PROVIDER", "ollama")
-os.environ.setdefault("EMBEDDING_BASE_URL", "http://localhost:11434/api/embeddings")
+os.environ.setdefault("EMBEDDING_BASE_URL", "http://localhost:11434/v1")
+os.environ.setdefault("EMBEDDING_API_KEY", "test")
 os.environ.setdefault("EMBEDDING_MODEL_NAME", "nomic-embed-text")
 os.environ.setdefault("EMBEDDING_DIM", "4")
 
-from src.crawler.postgres_client import store_crawled_documents
+from src.services.ingestion import store_crawled_documents
 
 # ---------------------------------------------------------------------------
 # Tests: store_crawled_documents
@@ -25,7 +25,7 @@ class TestStoreCrawledDocuments:
         session = MagicMock()
         crawl_results = [{"url": "https://x.com", "markdown": ""}]
 
-        with patch("src.crawler.postgres_client.add_documents_to_db", new_callable=AsyncMock) as mock_add:
+        with patch("src.services.ingestion.add_documents_to_db", new_callable=AsyncMock) as mock_add:
             pages, chunks = await store_crawled_documents(session, crawl_results, "webpage")
 
         assert pages == 1
@@ -38,7 +38,7 @@ class TestStoreCrawledDocuments:
         session = MagicMock()
         crawl_results = [{"url": "https://x.com"}]
 
-        with patch("src.crawler.postgres_client.add_documents_to_db", new_callable=AsyncMock) as mock_add:
+        with patch("src.services.ingestion.add_documents_to_db", new_callable=AsyncMock) as mock_add:
             pages, chunks = await store_crawled_documents(session, crawl_results, "webpage")
 
         assert pages == 1
@@ -53,13 +53,11 @@ class TestStoreCrawledDocuments:
 
         with (
             patch(
-                "src.crawler.postgres_client.chunk_text_according_to_settings",
+                "src.services.ingestion.chunk_text_according_to_settings",
                 new_callable=AsyncMock,
                 return_value=["# Title\n\nSome content."],
             ) as mock_chunk,
-            patch(
-                "src.crawler.postgres_client.add_documents_to_db", new_callable=AsyncMock, return_value=1
-            ) as mock_add,
+            patch("src.services.ingestion.add_documents_to_db", new_callable=AsyncMock, return_value=1) as mock_add,
         ):
             pages, chunks = await store_crawled_documents(session, crawl_results, "webpage")
 
@@ -81,10 +79,8 @@ class TestStoreCrawledDocuments:
             return [p for p in text.split("\n\n") if p.strip()]
 
         with (
-            patch("src.crawler.postgres_client.chunk_text_according_to_settings", side_effect=fake_chunk),
-            patch(
-                "src.crawler.postgres_client.add_documents_to_db", new_callable=AsyncMock, return_value=3
-            ) as mock_add,
+            patch("src.services.ingestion.chunk_text_according_to_settings", side_effect=fake_chunk),
+            patch("src.services.ingestion.add_documents_to_db", new_callable=AsyncMock, return_value=3) as mock_add,
         ):
             pages, chunks = await store_crawled_documents(session, crawl_results, "sitemap")
 
@@ -112,8 +108,8 @@ class TestStoreCrawledDocuments:
             return 1
 
         with (
-            patch("src.crawler.postgres_client.chunk_text_according_to_settings", side_effect=fake_chunk),
-            patch("src.crawler.postgres_client.add_documents_to_db", side_effect=capture_add),
+            patch("src.services.ingestion.chunk_text_according_to_settings", side_effect=fake_chunk),
+            patch("src.services.ingestion.add_documents_to_db", side_effect=capture_add),
         ):
             await store_crawled_documents(session, crawl_results, "webpage_single")
 
@@ -154,8 +150,8 @@ class TestStoreCrawledDocuments:
             return 1
 
         with (
-            patch("src.crawler.postgres_client.chunk_text_according_to_settings", side_effect=fake_chunk),
-            patch("src.crawler.postgres_client.add_documents_to_db", side_effect=capture_add),
+            patch("src.services.ingestion.chunk_text_according_to_settings", side_effect=fake_chunk),
+            patch("src.services.ingestion.add_documents_to_db", side_effect=capture_add),
         ):
             await store_crawled_documents(session, crawl_results, "webpage_single")
 
@@ -167,7 +163,7 @@ class TestStoreCrawledDocuments:
     async def test_empty_results_list(self):
         """Empty crawl_results returns (0, 0) without calling add_documents_to_db."""
         session = MagicMock()
-        with patch("src.crawler.postgres_client.add_documents_to_db", new_callable=AsyncMock) as mock_add:
+        with patch("src.services.ingestion.add_documents_to_db", new_callable=AsyncMock) as mock_add:
             pages, chunks = await store_crawled_documents(session, [], "webpage")
 
         assert pages == 0
@@ -187,8 +183,8 @@ class TestStoreCrawledDocuments:
             return [text]
 
         with (
-            patch("src.crawler.postgres_client.chunk_text_according_to_settings", side_effect=fake_chunk),
-            patch("src.crawler.postgres_client.add_documents_to_db", new_callable=AsyncMock, return_value=1),
+            patch("src.services.ingestion.chunk_text_according_to_settings", side_effect=fake_chunk),
+            patch("src.services.ingestion.add_documents_to_db", new_callable=AsyncMock, return_value=1),
         ):
             pages, chunks = await store_crawled_documents(session, crawl_results, "sitemap")
 
@@ -220,8 +216,8 @@ class TestStoreCrawledDocuments:
             return 1
 
         with (
-            patch("src.crawler.postgres_client.chunk_text_according_to_settings", side_effect=fake_chunk),
-            patch("src.crawler.postgres_client.add_documents_to_db", side_effect=capture_add),
+            patch("src.services.ingestion.chunk_text_according_to_settings", side_effect=fake_chunk),
+            patch("src.services.ingestion.add_documents_to_db", side_effect=capture_add),
         ):
             pages, chunks = await store_crawled_documents(session, crawl_results, "webpage")
 

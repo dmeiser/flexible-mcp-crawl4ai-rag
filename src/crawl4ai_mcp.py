@@ -21,7 +21,8 @@ from dotenv import load_dotenv
 from fastmcp import Context, FastMCP
 from sqlmodel import text
 
-from src.utils import get_session, settings
+from src.config import settings
+from src.models import get_session
 
 # Load .env from project root before any settings are imported
 project_root = Path(__file__).resolve().parent.parent
@@ -47,7 +48,7 @@ def _make_scheduler_ctx(crawler: AsyncWebCrawler) -> Context:
 
 async def _job_compute_value_scores(crawler: AsyncWebCrawler) -> None:
     try:
-        from src.crawler import tool_definitions as _td
+        from src.tools import tool_definitions as _td
 
         await _td.compute_value_scores(_make_scheduler_ctx(crawler), limit=2000)
     except Exception as exc:
@@ -56,7 +57,7 @@ async def _job_compute_value_scores(crawler: AsyncWebCrawler) -> None:
 
 async def _job_recrawl_due_sources(crawler: AsyncWebCrawler) -> None:
     try:
-        from src.crawler import tool_definitions as _td
+        from src.tools import tool_definitions as _td
 
         await _td.recrawl_due_sources(_make_scheduler_ctx(crawler), max_concurrent=5)
     except Exception as exc:
@@ -65,7 +66,7 @@ async def _job_recrawl_due_sources(crawler: AsyncWebCrawler) -> None:
 
 async def _job_prune_stale_content(crawler: AsyncWebCrawler) -> None:
     try:
-        from src.crawler import tool_definitions as _td
+        from src.tools import tool_definitions as _td
 
         await _td.prune_stale_content(_make_scheduler_ctx(crawler), force=False)
     except Exception as exc:
@@ -74,7 +75,7 @@ async def _job_prune_stale_content(crawler: AsyncWebCrawler) -> None:
 
 async def _job_enforce_storage_budget(crawler: AsyncWebCrawler) -> None:
     try:
-        from src.crawler import tool_definitions as _td
+        from src.tools import tool_definitions as _td
 
         await _td.enforce_storage_budget(_make_scheduler_ctx(crawler), force=False)
     except Exception as exc:
@@ -83,7 +84,7 @@ async def _job_enforce_storage_budget(crawler: AsyncWebCrawler) -> None:
 
 async def _job_hard_delete_tombstones(crawler: AsyncWebCrawler) -> None:
     try:
-        from src.crawler import tool_definitions as _td
+        from src.tools import tool_definitions as _td
 
         await _td.hard_delete_tombstones(_make_scheduler_ctx(crawler), max_age_hours=24)
     except Exception as exc:
@@ -92,7 +93,7 @@ async def _job_hard_delete_tombstones(crawler: AsyncWebCrawler) -> None:
 
 async def _job_detect_content_drift(crawler: AsyncWebCrawler) -> None:
     try:
-        from src.crawler import tool_definitions as _td
+        from src.tools import tool_definitions as _td
 
         await _td.detect_content_drift(_make_scheduler_ctx(crawler), trigger_selective_reembed=True)
     except Exception as exc:
@@ -195,7 +196,7 @@ mcp = FastMCP(
 # ---------------------------------------------------------------------------
 # Register tools
 # ---------------------------------------------------------------------------
-from src.crawler import tool_definitions  # noqa: E402
+from src.tools import tool_definitions  # noqa: E402
 
 mcp.tool()(tool_definitions.crawl_url)
 mcp.tool()(tool_definitions.crawl_to_markdown)
@@ -235,6 +236,9 @@ mcp.tool()(tool_definitions.get_markdown_by_url)
 
 if settings.USE_AGENTIC_RAG:
     mcp.tool()(tool_definitions.search_code_examples)
+
+if settings.USE_WEB_SEARCH:
+    mcp.tool()(tool_definitions.search_web)
 
 # Freshness/eviction maintenance remains scheduler-driven and is intentionally
 # not exposed as MCP admin/ops endpoints.

@@ -37,10 +37,9 @@ cp .env.example .env
 | Variable | Default | Required | Description |
 |---|---|---|---|
 | `POSTGRES_URL` | — | **yes** | Full SQLAlchemy DSN for the PostgreSQL+pgvector database |
-| `EMBEDDING_PROVIDER` | `ollama` | no | `ollama` or `openai` |
 | `EMBEDDING_DIM` | `768` | no | Vector dimension; must match the chosen model |
-| `EMBEDDING_BASE_URL` | provider-dependent | no | Embedding endpoint (`/api/embeddings` for Ollama, `/v1` for OpenAI-compatible APIs) |
-| `EMBEDDING_API_KEY` | — | if `EMBEDDING_PROVIDER=openai` | API key for the selected embedding provider |
+| `EMBEDDING_BASE_URL` | — | no | Base URL for the OpenAI-compatible embedding endpoint |
+| `EMBEDDING_API_KEY` | — | no | API key for the embedding provider (any non-empty value for Ollama) |
 | `EMBEDDING_MODEL_NAME` | provider-dependent | no | Embedding model name |
 | `EMBEDDING_MAX_RETRIES` | `3` | no | Retry attempts on embedding request failure |
 | `EMBEDDING_RETRY_DELAY_SECONDS` | `1.0` | no | Seconds between embedding retries |
@@ -54,6 +53,7 @@ cp .env.example .env
 | `USE_HYBRID_SEARCH` | `false` | no | Combine vector + full-text search (BM25/tsvector) |
 | `USE_AGENTIC_RAG` | `false` | no | Expose the feature-flagged `search_code_examples` tool |
 | `USE_RERANKING` | `false` | no | Cross-encoder re-ranking pass on retrieved results |
+| `USE_WEB_SEARCH` | `false` | no | Expose the feature-flagged `search_web` tool backed by OpenRouter web search |
 | `DEFAULT_LLM_PROVIDER` | `openai` | no | Shared fallback provider for LLM-powered features |
 | `DEFAULT_LLM_BASE_URL` | — | no | Shared fallback base URL for OpenAI-compatible LLM endpoints |
 | `DEFAULT_LLM_API_KEY` | — | no | Shared fallback API key for LLM-powered features |
@@ -61,6 +61,7 @@ cp .env.example .env
 | `CONTEXTUAL_LLM_*` | — | no | Optional overrides used by contextual embeddings |
 | `AGENTIC_LLM_*` | — | no | Preferred shared override bucket used by LLM-based filtering/extraction helpers and agentic-style features |
 | `RERANK_LLM_*` | see `.env.example` | no | Overrides for reranking; may target a local cross-encoder or an OpenAI-compatible scorer |
+| `WEB_SEARCH_*` | see `.env.example` | no | Provider-dispatched web search configuration, request defaults, and optional short-TTL cache settings |
 | `TRANSPORT` | `sse` | no | MCP transport: `sse` or `stdio` |
 | `HOST` | `0.0.0.0` | no | Bind address for the SSE server |
 | `PORT` | `8051` | no | Port for the SSE server |
@@ -139,26 +140,28 @@ uv run src/crawl4ai_mcp.py
 
 ## Embedding provider
 
+All embedding providers are accessed through the OpenAI-compatible client. Set `EMBEDDING_BASE_URL` and `EMBEDDING_API_KEY` to point at any compatible endpoint.
+
 ### Bundled Ollama (default)
 
 ```env
-EMBEDDING_PROVIDER=ollama
-EMBEDDING_BASE_URL=http://ollama:11434/api/embeddings
+EMBEDDING_BASE_URL=http://localhost:11434/v1
+EMBEDDING_API_KEY=ollama
 EMBEDDING_MODEL_NAME=nomic-embed-text
 EMBEDDING_DIM=768
 ```
 
-The `docker-compose.yml` starts an `ollama` container and pulls `nomic-embed-text` automatically on first run (~274 MB, cached in the `ollama_data` volume). Expect up to two minutes on the first `make up`.
+The `docker-compose.yml` starts an `ollama` container, pulls `nomic-embed-text` automatically on first run (~274 MB, cached in the `ollama_data` volume), and overrides `EMBEDDING_BASE_URL` to `http://ollama:11434/v1` inside the container. Expect up to two minutes on the first `make up`.
 
 ### External Ollama instance
 
 To use an Ollama server running on the host machine or elsewhere, override `EMBEDDING_BASE_URL`:
 
 ```env
-EMBEDDING_PROVIDER=ollama
-EMBEDDING_BASE_URL=http://host.docker.internal:11434/api/embeddings   # from inside a container
+EMBEDDING_BASE_URL=http://host.docker.internal:11434/v1   # from inside a container
 # or
-EMBEDDING_BASE_URL=http://192.168.1.50:11434/api/embeddings           # remote host
+EMBEDDING_BASE_URL=http://192.168.1.50:11434/v1           # remote host
+EMBEDDING_API_KEY=ollama
 EMBEDDING_MODEL_NAME=nomic-embed-text
 EMBEDDING_DIM=768
 ```
@@ -205,14 +208,13 @@ Or comment out / remove the `ollama` service from `docker-compose.yml` for a per
 ### OpenAI
 
 ```env
-EMBEDDING_PROVIDER=openai
 EMBEDDING_API_KEY=sk-...
 EMBEDDING_MODEL_NAME=text-embedding-3-small
 EMBEDDING_BASE_URL=https://api.openai.com/v1
 EMBEDDING_DIM=1536
 ```
 
-`EMBEDDING_API_KEY` is validated at startup when `EMBEDDING_PROVIDER=openai`. `EMBEDDING_DIM` must match the model output dimension:
+`EMBEDDING_DIM` must match the model output dimension:
 
 | Model | Dimension |
 |---|---|
@@ -220,17 +222,7 @@ EMBEDDING_DIM=1536
 | `text-embedding-3-large` | 3072 |
 | `text-embedding-ada-002` | 1536 |
 
-### OpenAI-compatible endpoint (Ollama v0.1.28+)
-
-Ollama exposes an OpenAI-compatible endpoint at `/v1` alongside the native `/api/embeddings` endpoint. This is useful to use the OpenAI client library with a local model:
-
-```env
-EMBEDDING_PROVIDER=openai
-EMBEDDING_API_KEY=ollama          # Ollama ignores the key; any non-empty value works
-EMBEDDING_MODEL_NAME=nomic-embed-text
-EMBEDDING_BASE_URL=http://localhost:11434/v1
-EMBEDDING_DIM=768
-```
+### Other OpenAI-compatible endpoints
 
 `EMBEDDING_BASE_URL` overrides the base URL used by the `openai` Python client, so any OpenAI-compatible server (LM Studio, vLLM, Azure OpenAI, etc.) works the same way.
 
@@ -280,6 +272,7 @@ USE_CONTEXTUAL_EMBEDDINGS=false
 USE_HYBRID_SEARCH=false
 USE_AGENTIC_RAG=false
 USE_RERANKING=false
+USE_WEB_SEARCH=false
 ```
 
 | Flag | Effect when `true` |
@@ -288,6 +281,7 @@ USE_RERANKING=false
 | `USE_HYBRID_SEARCH` | Vector similarity search is combined with full-text (tsvector/BM25) search. Improves recall for keyword-heavy queries. The `fts` column is generated automatically; no extra setup required. |
 | `USE_AGENTIC_RAG` | Registers the feature-flagged MCP tool `search_code_examples`. Off by default to avoid exposing an extra retrieval surface unintentionally. |
 | `USE_RERANKING` | Applies a cross-encoder re-ranking pass to returned results. Improves precision. Requires a compatible re-ranker model to be available (currently uses the embedding provider). |
+| `USE_WEB_SEARCH` | Registers the feature-flagged MCP tool `search_web`, which calls OpenRouter's `openrouter:web_search` server tool. Optional caching stores short-lived web-lead records for crawl/recrawl workflows, not normal document retrieval. |
 
 ---
 
@@ -299,6 +293,7 @@ LLM-powered features use a shared fallback plus optional per-feature overrides.
 - `CONTEXTUAL_LLM_*` overrides are used by contextual embeddings.
 - `AGENTIC_LLM_*` is the preferred shared override bucket currently used by LLM-based content filtering and extraction helpers, and is also available to agentic-style features.
 - `RERANK_LLM_*` overrides are used only by reranking.
+- `WEB_SEARCH_*` configures the separate provider-dispatched live web search tool and its optional ephemeral cache.
 
 There is no separate `HYBRID_LLM_*` setting family; hybrid retrieval is vector search + PostgreSQL full-text search.
 
@@ -353,6 +348,60 @@ RERANK_LLM_MODEL_NAME=cross-encoder/ms-marco-MiniLM-L-6-v2
 - Direct OpenAI — `https://api.openai.com/v1`
 - Local LM Studio — `http://localhost:1234/v1`
 - Ollama OpenAI endpoint — `http://localhost:11434/v1`
+
+### Web search
+
+`search_web` is a separate MCP tool with a pluggable provider model. Today the supported provider is `openrouter`; the settings surface is structured so future providers such as Brave or DuckDuckGo can be added behind the same tool contract.
+
+Current provider selection:
+
+```env
+WEB_SEARCH_PROVIDER=openrouter
+```
+
+With `WEB_SEARCH_PROVIDER=openrouter`, the tool performs live web queries through OpenRouter's current server-tool interface:
+
+```json
+{
+   "tools": [
+      {
+         "type": "openrouter:web_search",
+         "parameters": {
+            "engine": "auto",
+            "max_results": 5
+         }
+      }
+   ]
+}
+```
+
+Example configuration:
+
+```env
+USE_WEB_SEARCH=true
+WEB_SEARCH_PROVIDER=openrouter
+WEB_SEARCH_BASE_URL=https://openrouter.ai/api/v1
+WEB_SEARCH_API_KEY=<key>
+WEB_SEARCH_MODEL_NAME=openrouter/perplexity/sonar
+WEB_SEARCH_DEFAULT_ENGINE=auto
+WEB_SEARCH_DEFAULT_MAX_RESULTS=5
+```
+
+Optional ephemeral cache:
+
+```env
+WEB_SEARCH_CACHE_ENABLED=true
+WEB_SEARCH_CACHE_TTL_HOURS=24
+WEB_SEARCH_CACHE_SOURCE=openrouter_web_search
+```
+
+Cached web-search rows are intentionally stored outside normal retrieval flow:
+
+- they are persisted as short-lived crawl/recrawl leads,
+- they are marked inactive so `search_documents` does not return them by default,
+- they carry explicit expiry metadata and are pruned automatically on later cache writes.
+
+As additional providers are implemented later, they should plug into the same `search_web` tool and `WEB_SEARCH_PROVIDER` switch rather than creating parallel MCP tools.
 
 ---
 

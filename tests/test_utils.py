@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 os.environ.setdefault("POSTGRES_URL", "postgresql://u:p@localhost:5432/testdb")
-os.environ.setdefault("EMBEDDING_PROVIDER", "ollama")
 os.environ.setdefault("EMBEDDING_BASE_URL", "http://localhost:11434/api/embeddings")
 os.environ.setdefault("EMBEDDING_MODEL_NAME", "nomic-embed-text")
 os.environ.setdefault("EMBEDDING_DIM", "4")
@@ -21,48 +20,32 @@ os.environ.setdefault("USE_HYBRID_SEARCH", "false")
 os.environ.setdefault("USE_AGENTIC_RAG", "false")
 os.environ.setdefault("USE_RERANKING", "false")
 
-from src.utils import (
-    ChunkStrategy,
-    EmbeddingError,
-    EmbeddingProvider,
-    LLMProvider,
-    OllamaError,
-    Settings,
-    _async_chat_completion_with_retries,
-    _code_example_row_to_result,
-    _create_ollama_embedding,
-    _create_openai_embedding,
-    _extract_record_source,
-    _get_db_size_bytes,
-    _merge_vector_and_fts_rows,
-    _normalize,
+from src.config import ChunkStrategy, Settings
+from src.exceptions import EmbeddingError
+from src.models import get_session
+from src.providers.openai_stack import ChatCompletionRetryStrategy, OpenAIConfiguration
+from src.services.content_extraction import extract_code_blocks, extract_link_references
+from src.services.document_storage_service import (
     _normalize_source_change_id,
     _parse_iso_datetime,
-    _parse_rerank_scores,
-    _python_side_vector_search,
-    _query_code_example_rows,
-    _request_contextual_summary,
-    _rerank_json_payload,
-    _rerank_score_values,
     _resolve_content_hash,
     _resolve_link_references,
-    _resolved_openai_api_key,
-    _sync_chat_completion_with_retries,
     add_code_examples_to_db,
     add_documents_to_db,
-    compute_staleness_score,
-    compute_value_score,
+    upsert_source,
+)
+from src.services.reranking_service import parse_rerank_scores, rerank_json_payload, rerank_results, rerank_score_values
+from src.services.retrieval import code_example_row_to_result, merge_vector_and_fts_rows, query_code_example_rows
+from src.services.scoring_service import compute_staleness_score, compute_value_score
+from src.services.search_service import _python_side_vector_search, search_code_examples, search_documents
+from src.services.tombstone_service import _extract_record_source, get_db_size_bytes, tombstone_records
+from src.utils import (
+    _create_openai_embedding,
+    _normalize,
+    _request_contextual_summary,
     create_embedding,
     create_embeddings_batch,
-    extract_code_blocks,
-    extract_link_references,
     generate_contextual_text,
-    get_session,
-    rerank_results,
-    search_code_examples,
-    search_documents,
-    tombstone_records,
-    upsert_source,
 )
 
 DIM = 4
@@ -81,7 +64,6 @@ EMBED_Q = _vec(1.0, 0.0, 0.0, 0.0)
 def _fake_settings(**kw):
     defaults = dict(
         POSTGRES_URL="postgresql://u:p@localhost:5432/testdb",
-        EMBEDDING_PROVIDER=EmbeddingProvider.OLLAMA,
         EMBEDDING_DIM=DIM,
         EMBEDDING_BASE_URL="http://localhost:11434/api/embeddings",
         EMBEDDING_MODEL_NAME="nomic-embed-text",
@@ -98,50 +80,42 @@ def _fake_settings(**kw):
         USE_RERANKING=False,
         MARKDOWN_INDEX_POLICY="both-by-default",
         MARKDOWN_FALLBACK_ENABLED=True,
-        DEFAULT_LLM_PROVIDER=LLMProvider.OPENAI,
         DEFAULT_LLM_API_KEY=None,
         DEFAULT_LLM_BASE_URL=None,
         DEFAULT_LLM_MODEL_NAME=None,
         DEFAULT_LLM_MAX_RETRIES=3,
         DEFAULT_LLM_RETRY_DELAY_SECONDS=1.0,
-        CONTEXTUAL_LLM_PROVIDER=None,
         CONTEXTUAL_LLM_API_KEY=None,
         CONTEXTUAL_LLM_BASE_URL=None,
         CONTEXTUAL_LLM_MODEL_NAME=None,
         CONTEXTUAL_LLM_MAX_RETRIES=None,
         CONTEXTUAL_LLM_RETRY_DELAY_SECONDS=None,
-        AGENTIC_LLM_PROVIDER=None,
         AGENTIC_LLM_API_KEY=None,
         AGENTIC_LLM_BASE_URL=None,
         AGENTIC_LLM_MODEL_NAME=None,
         AGENTIC_LLM_MAX_RETRIES=None,
         AGENTIC_LLM_RETRY_DELAY_SECONDS=None,
-        RERANK_LLM_PROVIDER=None,
         RERANK_LLM_API_KEY=None,
         RERANK_LLM_BASE_URL=None,
         RERANK_LLM_MODEL_NAME="cross-encoder/ms-marco-MiniLM-L-6-v2",
         RERANK_LLM_MAX_RETRIES=None,
         RERANK_LLM_RETRY_DELAY_SECONDS=None,
-        effective_contextual_provider=LLMProvider.OPENAI,
         effective_contextual_api_key=None,
         effective_contextual_base_url=None,
         effective_contextual_model_name=None,
         effective_contextual_max_retries=3,
         effective_contextual_retry_delay_seconds=1.0,
-        effective_agentic_provider=LLMProvider.OPENAI,
         effective_agentic_api_key=None,
         effective_agentic_base_url=None,
         effective_agentic_model_name=None,
         effective_agentic_max_retries=3,
         effective_agentic_retry_delay_seconds=1.0,
-        effective_rerank_provider=LLMProvider.OPENAI,
         effective_rerank_api_key=None,
         effective_rerank_base_url=None,
         effective_rerank_model_name="cross-encoder/ms-marco-MiniLM-L-6-v2",
         effective_rerank_max_retries=3,
         effective_rerank_retry_delay_seconds=1.0,
         effective_embedding_base_url="http://localhost:11434/api/embeddings",
-        effective_embedding_ollama_url="http://localhost:11434/api/embeddings",
         effective_embedding_model_name="nomic-embed-text",
         effective_embedding_max_retries=2,
         effective_embedding_retry_delay_seconds=0.001,
@@ -149,9 +123,6 @@ def _fake_settings(**kw):
     defaults.update(kw)
     defaults["effective_contextual_api_key"] = defaults.get("CONTEXTUAL_LLM_API_KEY") or defaults.get(
         "DEFAULT_LLM_API_KEY"
-    )
-    defaults["effective_contextual_provider"] = defaults.get("CONTEXTUAL_LLM_PROVIDER") or defaults.get(
-        "DEFAULT_LLM_PROVIDER"
     )
     defaults["effective_contextual_base_url"] = defaults.get("CONTEXTUAL_LLM_BASE_URL") or defaults.get(
         "DEFAULT_LLM_BASE_URL"
@@ -166,9 +137,6 @@ def _fake_settings(**kw):
         "CONTEXTUAL_LLM_RETRY_DELAY_SECONDS"
     ) or defaults.get("DEFAULT_LLM_RETRY_DELAY_SECONDS")
     defaults["effective_agentic_api_key"] = defaults.get("AGENTIC_LLM_API_KEY") or defaults.get("DEFAULT_LLM_API_KEY")
-    defaults["effective_agentic_provider"] = defaults.get("AGENTIC_LLM_PROVIDER") or defaults.get(
-        "DEFAULT_LLM_PROVIDER"
-    )
     defaults["effective_agentic_base_url"] = defaults.get("AGENTIC_LLM_BASE_URL") or defaults.get(
         "DEFAULT_LLM_BASE_URL"
     )
@@ -182,7 +150,6 @@ def _fake_settings(**kw):
         "DEFAULT_LLM_RETRY_DELAY_SECONDS"
     )
     defaults["effective_rerank_api_key"] = defaults.get("RERANK_LLM_API_KEY") or defaults.get("DEFAULT_LLM_API_KEY")
-    defaults["effective_rerank_provider"] = defaults.get("RERANK_LLM_PROVIDER") or defaults.get("DEFAULT_LLM_PROVIDER")
     defaults["effective_rerank_base_url"] = defaults.get("RERANK_LLM_BASE_URL") or defaults.get("DEFAULT_LLM_BASE_URL")
     defaults["effective_rerank_model_name"] = (
         defaults.get("RERANK_LLM_MODEL_NAME")
@@ -196,35 +163,19 @@ def _fake_settings(**kw):
         "DEFAULT_LLM_RETRY_DELAY_SECONDS"
     )
     defaults["effective_embedding_base_url"] = defaults.get("EMBEDDING_BASE_URL")
-    defaults["effective_embedding_ollama_url"] = (
-        defaults.get("EMBEDDING_BASE_URL") or "http://localhost:11434/api/embeddings"
-    )
-    defaults["effective_embedding_model_name"] = defaults.get("EMBEDDING_MODEL_NAME") or (
-        "text-embedding-3-small"
-        if defaults.get("EMBEDDING_PROVIDER") == EmbeddingProvider.OPENAI
-        else "nomic-embed-text"
-    )
+    defaults["effective_embedding_model_name"] = defaults.get("EMBEDDING_MODEL_NAME") or "nomic-embed-text"
     defaults["effective_embedding_max_retries"] = defaults.get("EMBEDDING_MAX_RETRIES")
     defaults["effective_embedding_retry_delay_seconds"] = defaults.get("EMBEDDING_RETRY_DELAY_SECONDS")
     return MagicMock(**defaults)
 
 
-# ---------------------------------------------------------------------------
-# Tests: EmbeddingError / OllamaError alias
-# ---------------------------------------------------------------------------
-
-
-def test_ollama_error_is_embedding_error():
-    assert OllamaError is EmbeddingError
-
-
 def test_embedding_error_raise():
     with pytest.raises(EmbeddingError):
-        raise OllamaError("test")
+        raise EmbeddingError("test")
 
 
 # ---------------------------------------------------------------------------
-# Tests: ChunkStrategy / EmbeddingProvider enums
+# Tests: ChunkStrategy enums
 # ---------------------------------------------------------------------------
 
 
@@ -233,11 +184,6 @@ def test_chunk_strategy_values():
     assert ChunkStrategy.SENTENCE == "sentence"
     assert ChunkStrategy.FIXED == "fixed"
     assert ChunkStrategy.SEMANTIC == "semantic"
-
-
-def test_embedding_provider_values():
-    assert EmbeddingProvider.OPENAI == "openai"
-    assert EmbeddingProvider.OLLAMA == "ollama"
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +195,6 @@ class TestSettingsValidation:
     def test_default_llm_settings_are_optional(self):
         s = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
-            EMBEDDING_PROVIDER="ollama",
             EMBEDDING_BASE_URL="http://localhost:11434/api/embeddings",
             EMBEDDING_MODEL_NAME="m",
             DEFAULT_LLM_API_KEY=None,
@@ -261,7 +206,6 @@ class TestSettingsValidation:
     def test_contextual_effective_falls_back_to_default(self):
         s = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
-            EMBEDDING_PROVIDER="ollama",
             EMBEDDING_BASE_URL="http://localhost:11434/api/embeddings",
             EMBEDDING_MODEL_NAME="m",
             DEFAULT_LLM_API_KEY="key",
@@ -275,7 +219,6 @@ class TestSettingsValidation:
     def test_contextual_override_takes_priority(self):
         s = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
-            EMBEDDING_PROVIDER="ollama",
             EMBEDDING_BASE_URL="http://localhost:11434/api/embeddings",
             EMBEDDING_MODEL_NAME="m",
             DEFAULT_LLM_MODEL_NAME="default-model",
@@ -284,38 +227,34 @@ class TestSettingsValidation:
         assert s.effective_contextual_model_name == "ctx-model"
 
     def test_openai_missing_key_raises(self):
-        with pytest.raises(Exception, match="EMBEDDING_API_KEY"):
-            Settings(
-                POSTGRES_URL="postgresql://u:p@h/db",
-                EMBEDDING_PROVIDER="openai",
-                EMBEDDING_API_KEY=None,
-                EMBEDDING_BASE_URL="http://localhost:11434/api/embeddings",
-                EMBEDDING_MODEL_NAME="m",
-            )
+        s = Settings(
+            POSTGRES_URL="postgresql://u:p@h/db",
+            EMBEDDING_API_KEY=None,
+            EMBEDDING_BASE_URL="http://localhost:11434/api/embeddings",
+            EMBEDDING_MODEL_NAME="m",
+        )
+        assert s.EMBEDDING_API_KEY is None
 
     def test_openai_missing_key_with_base_url_still_raises(self):
-        with pytest.raises(Exception, match="EMBEDDING_API_KEY"):
-            Settings(
-                POSTGRES_URL="postgresql://u:p@h/db",
-                EMBEDDING_PROVIDER="openai",
-                EMBEDDING_API_KEY=None,
-                EMBEDDING_BASE_URL="http://ollama:11434/v1",
-                EMBEDDING_MODEL_NAME="m",
-            )
+        s = Settings(
+            POSTGRES_URL="postgresql://u:p@h/db",
+            EMBEDDING_API_KEY=None,
+            EMBEDDING_BASE_URL="http://ollama:11434/v1",
+            EMBEDDING_MODEL_NAME="m",
+        )
+        assert s.EMBEDDING_API_KEY is None
 
     def test_valid_settings_ok(self):
         s = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
-            EMBEDDING_PROVIDER="ollama",
             EMBEDDING_BASE_URL="http://localhost:11434/api/embeddings",
             EMBEDDING_MODEL_NAME="m",
         )
-        assert s.EMBEDDING_PROVIDER == EmbeddingProvider.OLLAMA
+        assert s.EMBEDDING_MODEL_NAME == "m"
 
     def test_rerank_effective_base_url_and_api_key_fallback_to_default(self):
         s = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
-            EMBEDDING_PROVIDER="ollama",
             EMBEDDING_BASE_URL="http://localhost:11434/api/embeddings",
             EMBEDDING_MODEL_NAME="m",
             DEFAULT_LLM_BASE_URL="http://default-llm",
@@ -329,7 +268,6 @@ class TestSettingsValidation:
     def test_rerank_effective_model_fallback_prefers_default_then_builtin(self):
         with_default = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
-            EMBEDDING_PROVIDER="ollama",
             EMBEDDING_BASE_URL="http://localhost:11434/api/embeddings",
             EMBEDDING_MODEL_NAME="m",
             DEFAULT_LLM_MODEL_NAME="default-rerank-model",
@@ -339,7 +277,6 @@ class TestSettingsValidation:
 
         with_builtin = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
-            EMBEDDING_PROVIDER="ollama",
             EMBEDDING_BASE_URL="http://localhost:11434/api/embeddings",
             EMBEDDING_MODEL_NAME="m",
             DEFAULT_LLM_MODEL_NAME="",
@@ -350,14 +287,12 @@ class TestSettingsValidation:
     def test_effective_embedding_properties_use_configured_values(self):
         s = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
-            EMBEDDING_PROVIDER="ollama",
             EMBEDDING_BASE_URL="http://ollama:11434/api/embeddings",
             EMBEDDING_MODEL_NAME="nomic-embed-text",
             EMBEDDING_MAX_RETRIES=7,
             EMBEDDING_RETRY_DELAY_SECONDS=0.25,
         )
         assert s.effective_embedding_base_url == "http://ollama:11434/api/embeddings"
-        assert s.effective_embedding_ollama_url == "http://ollama:11434/api/embeddings"
         assert s.effective_embedding_model_name == "nomic-embed-text"
         assert s.effective_embedding_max_retries == 7
         assert s.effective_embedding_retry_delay_seconds == pytest.approx(0.25)
@@ -365,37 +300,14 @@ class TestSettingsValidation:
     def test_effective_embedding_model_defaults_for_openai(self):
         s = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
-            EMBEDDING_PROVIDER="openai",
             EMBEDDING_API_KEY="sk-test",
-            EMBEDDING_MODEL_NAME=None,
-        )
-        assert s.effective_embedding_model_name == "text-embedding-3-small"
-
-    def test_effective_embedding_model_defaults_for_ollama(self):
-        s = Settings(
-            POSTGRES_URL="postgresql://u:p@h/db",
-            EMBEDDING_PROVIDER="ollama",
             EMBEDDING_MODEL_NAME=None,
         )
         assert s.effective_embedding_model_name == "nomic-embed-text"
 
-    def test_effective_llm_provider_fallbacks_and_overrides(self):
-        s = Settings(
-            POSTGRES_URL="postgresql://u:p@h/db",
-            EMBEDDING_PROVIDER="ollama",
-            DEFAULT_LLM_PROVIDER="openai",
-            CONTEXTUAL_LLM_PROVIDER="ollama",
-            AGENTIC_LLM_PROVIDER="ollama",
-            RERANK_LLM_PROVIDER=None,
-        )
-        assert s.effective_contextual_provider == LLMProvider.OLLAMA
-        assert s.effective_agentic_provider == LLMProvider.OLLAMA
-        assert s.effective_rerank_provider == LLMProvider.OPENAI
-
     def test_effective_rerank_retry_fallback_and_override(self):
         fallback = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
-            EMBEDDING_PROVIDER="ollama",
             DEFAULT_LLM_MAX_RETRIES=9,
             DEFAULT_LLM_RETRY_DELAY_SECONDS=0.75,
             RERANK_LLM_MAX_RETRIES=None,
@@ -406,7 +318,6 @@ class TestSettingsValidation:
 
         override = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
-            EMBEDDING_PROVIDER="ollama",
             DEFAULT_LLM_MAX_RETRIES=9,
             DEFAULT_LLM_RETRY_DELAY_SECONDS=0.75,
             RERANK_LLM_MAX_RETRIES=2,
@@ -418,7 +329,6 @@ class TestSettingsValidation:
     def test_effective_agentic_retry_fallbacks_and_overrides(self):
         s = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
-            EMBEDDING_PROVIDER="ollama",
             DEFAULT_LLM_MAX_RETRIES=7,
             DEFAULT_LLM_RETRY_DELAY_SECONDS=0.4,
             AGENTIC_LLM_MAX_RETRIES=2,
@@ -430,7 +340,6 @@ class TestSettingsValidation:
     def test_effective_contextual_retry_fallback_and_override(self):
         fallback = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
-            EMBEDDING_PROVIDER="ollama",
             DEFAULT_LLM_MAX_RETRIES=5,
             DEFAULT_LLM_RETRY_DELAY_SECONDS=0.3,
             CONTEXTUAL_LLM_MAX_RETRIES=None,
@@ -441,7 +350,6 @@ class TestSettingsValidation:
 
         override = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
-            EMBEDDING_PROVIDER="ollama",
             DEFAULT_LLM_MAX_RETRIES=5,
             DEFAULT_LLM_RETRY_DELAY_SECONDS=0.3,
             CONTEXTUAL_LLM_MAX_RETRIES=2,
@@ -458,7 +366,7 @@ class TestChatCompletionRetryHelpers:
         mock_client.chat.completions.create = AsyncMock(side_effect=RuntimeError("always fails"))
 
         with pytest.raises(RuntimeError, match="always fails"):
-            await _async_chat_completion_with_retries(
+            await ChatCompletionRetryStrategy.async_chat_completion_with_retries(
                 client=mock_client,
                 request_kwargs={"model": "m", "messages": []},
                 max_retries=1,
@@ -471,7 +379,7 @@ class TestChatCompletionRetryHelpers:
         mock_client.chat.completions.create.side_effect = RuntimeError("always fails")
 
         with pytest.raises(RuntimeError, match="always fails"):
-            _sync_chat_completion_with_retries(
+            ChatCompletionRetryStrategy.sync_chat_completion_with_retries(
                 client=mock_client,
                 request_kwargs={"model": "m", "messages": []},
                 max_retries=1,
@@ -544,8 +452,8 @@ class TestCreateEmbedding:
     @pytest.mark.asyncio
     async def test_routes_to_ollama(self):
         with (
-            patch("src.utils.settings", _fake_settings(EMBEDDING_PROVIDER=EmbeddingProvider.OLLAMA)),
-            patch("src.utils._create_ollama_embedding", new_callable=AsyncMock, return_value=EMBED_A) as mock_o,
+            patch("src.utils.settings", _fake_settings()),
+            patch("src.utils._create_openai_embedding", new_callable=AsyncMock, return_value=EMBED_A) as mock_o,
         ):
             result = await create_embedding("hello")
         mock_o.assert_called_once_with("hello")
@@ -557,7 +465,6 @@ class TestCreateEmbedding:
             patch(
                 "src.utils.settings",
                 _fake_settings(
-                    EMBEDDING_PROVIDER=EmbeddingProvider.OPENAI,
                     EMBEDDING_API_KEY="sk-test",
                 ),
             ),
@@ -566,162 +473,6 @@ class TestCreateEmbedding:
             result = await create_embedding("hello")
         mock_oa.assert_called_once_with("hello")
         assert result == EMBED_A
-
-
-# ---------------------------------------------------------------------------
-# Tests: _create_ollama_embedding
-# ---------------------------------------------------------------------------
-
-
-class TestOllamaEmbedding:
-    def _make_client(self, side_effect=None, return_value=None):
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {"embedding": [1.0, 0.0, 0.0, 0.0]}
-
-        mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        if side_effect is not None:
-            mock_client.post = AsyncMock(side_effect=side_effect)
-        else:
-            mock_client.post = AsyncMock(return_value=return_value or mock_resp)
-        return mock_client
-
-    @pytest.mark.asyncio
-    async def test_success(self):
-        raw = [1.0, 0.0, 0.0, 0.0]
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {"embedding": raw}
-        mc = self._make_client(return_value=mock_resp)
-
-        with patch("src.utils.settings", _fake_settings()), patch("src.utils.httpx.AsyncClient", return_value=mc):
-            result = await _create_ollama_embedding("test")
-        assert result == _normalize(raw)
-
-    @pytest.mark.asyncio
-    async def test_retry_on_timeout_then_success(self):
-        import httpx as httpx_lib
-
-        raw = [1.0, 0.0, 0.0, 0.0]
-        success_resp = MagicMock()
-        success_resp.raise_for_status = MagicMock()
-        success_resp.json.return_value = {"embedding": raw}
-        mc = self._make_client(
-            side_effect=[
-                httpx_lib.TimeoutException("timeout"),
-                success_resp,
-            ]
-        )
-
-        with (
-            patch(
-                "src.utils.settings",
-                _fake_settings(EMBEDDING_MAX_RETRIES=2, EMBEDDING_RETRY_DELAY_SECONDS=0.001),
-            ),
-            patch("src.utils.httpx.AsyncClient", return_value=mc),
-            patch("src.utils.asyncio.sleep", new_callable=AsyncMock),
-        ):
-            result = await _create_ollama_embedding("test")
-        assert result == _normalize(raw)
-
-    @pytest.mark.asyncio
-    async def test_connect_error_retry_then_success(self):
-        import httpx as httpx_lib
-
-        raw = [0.0, 1.0, 0.0, 0.0]
-        success_resp = MagicMock()
-        success_resp.raise_for_status = MagicMock()
-        success_resp.json.return_value = {"embedding": raw}
-        mc = self._make_client(
-            side_effect=[
-                httpx_lib.ConnectError("conn refused"),
-                success_resp,
-            ]
-        )
-
-        with (
-            patch(
-                "src.utils.settings",
-                _fake_settings(EMBEDDING_MAX_RETRIES=2, EMBEDDING_RETRY_DELAY_SECONDS=0.001),
-            ),
-            patch("src.utils.httpx.AsyncClient", return_value=mc),
-            patch("src.utils.asyncio.sleep", new_callable=AsyncMock),
-        ):
-            result = await _create_ollama_embedding("test")
-        assert result == _normalize(raw)
-
-    @pytest.mark.asyncio
-    async def test_max_retries_exceeded_raises(self):
-        import httpx as httpx_lib
-
-        mc = self._make_client(side_effect=httpx_lib.TimeoutException("timeout"))
-
-        with (
-            patch(
-                "src.utils.settings",
-                _fake_settings(EMBEDDING_MAX_RETRIES=2, EMBEDDING_RETRY_DELAY_SECONDS=0.001),
-            ),
-            patch("src.utils.httpx.AsyncClient", return_value=mc),
-            patch("src.utils.asyncio.sleep", new_callable=AsyncMock),
-        ):
-            with pytest.raises(EmbeddingError):
-                await _create_ollama_embedding("test")
-
-    @pytest.mark.asyncio
-    async def test_http_status_error_raises(self):
-        import httpx as httpx_lib
-
-        error_resp = MagicMock()
-        error_resp.status_code = 500
-        mc = self._make_client(side_effect=httpx_lib.HTTPStatusError("error", request=MagicMock(), response=error_resp))
-
-        with (
-            patch("src.utils.settings", _fake_settings(EMBEDDING_MAX_RETRIES=1)),
-            patch("src.utils.httpx.AsyncClient", return_value=mc),
-        ):
-            with pytest.raises(EmbeddingError):
-                await _create_ollama_embedding("test")
-
-    @pytest.mark.asyncio
-    async def test_invalid_embedding_none_raises(self):
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {"embedding": None}
-        mc = self._make_client(return_value=mock_resp)
-
-        with (
-            patch("src.utils.settings", _fake_settings(EMBEDDING_MAX_RETRIES=1)),
-            patch("src.utils.httpx.AsyncClient", return_value=mc),
-        ):
-            with pytest.raises(EmbeddingError):
-                await _create_ollama_embedding("test")
-
-    @pytest.mark.asyncio
-    async def test_invalid_embedding_non_list_raises(self):
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {"embedding": "not-a-list"}
-        mc = self._make_client(return_value=mock_resp)
-
-        with (
-            patch("src.utils.settings", _fake_settings(EMBEDDING_MAX_RETRIES=1)),
-            patch("src.utils.httpx.AsyncClient", return_value=mc),
-        ):
-            with pytest.raises(EmbeddingError):
-                await _create_ollama_embedding("test")
-
-    @pytest.mark.asyncio
-    async def test_unexpected_exception_raises(self):
-        mc = self._make_client(side_effect=RuntimeError("unexpected"))
-
-        with (
-            patch("src.utils.settings", _fake_settings(EMBEDDING_MAX_RETRIES=1)),
-            patch("src.utils.httpx.AsyncClient", return_value=mc),
-        ):
-            with pytest.raises(EmbeddingError):
-                await _create_ollama_embedding("test")
 
 
 # ---------------------------------------------------------------------------
@@ -742,7 +493,6 @@ class TestOpenAIEmbedding:
             patch(
                 "src.utils.settings",
                 _fake_settings(
-                    EMBEDDING_PROVIDER=EmbeddingProvider.OPENAI,
                     EMBEDDING_API_KEY="sk-test",
                     EMBEDDING_MODEL_NAME="text-embedding-3-small",
                     EMBEDDING_BASE_URL=None,
@@ -765,7 +515,6 @@ class TestOpenAIEmbedding:
             patch(
                 "src.utils.settings",
                 _fake_settings(
-                    EMBEDDING_PROVIDER=EmbeddingProvider.OPENAI,
                     EMBEDDING_API_KEY="sk-test",
                     EMBEDDING_BASE_URL="http://custom:11434",
                 ),
@@ -788,7 +537,6 @@ class TestOpenAIEmbedding:
             patch(
                 "src.utils.settings",
                 _fake_settings(
-                    EMBEDDING_PROVIDER=EmbeddingProvider.OPENAI,
                     EMBEDDING_API_KEY=None,
                     EMBEDDING_BASE_URL="http://ollama:11434/v1",
                 ),
@@ -810,7 +558,6 @@ class TestOpenAIEmbedding:
             patch(
                 "src.utils.settings",
                 _fake_settings(
-                    EMBEDDING_PROVIDER=EmbeddingProvider.OPENAI,
                     EMBEDDING_API_KEY="sk-test",
                 ),
             ),
@@ -897,7 +644,6 @@ class TestContextualText:
                 "src.utils.settings",
                 _fake_settings(
                     USE_CONTEXTUAL_EMBEDDINGS=True,
-                    DEFAULT_LLM_PROVIDER=LLMProvider.OLLAMA,
                     DEFAULT_LLM_API_KEY=None,
                     DEFAULT_LLM_BASE_URL="http://ollama:11434/v1",
                     DEFAULT_LLM_MODEL_NAME="llama3.1:8b",
@@ -908,7 +654,7 @@ class TestContextualText:
             _text, _enriched = await generate_contextual_text("full doc", "chunk text")
 
         kwargs = mock_async_openai.call_args[1]
-        assert kwargs["api_key"] == "ollama"
+        assert kwargs["api_key"] is None
         assert kwargs["base_url"] == "http://ollama:11434/v1"
 
     @pytest.mark.asyncio
@@ -1039,7 +785,7 @@ class TestAddDocumentsToDb:
 
         with (
             patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
-            patch("src.utils.upsert_source", return_value=1),
+            patch("src.services.document_storage_service.upsert_source", return_value=1),
             patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, DEFAULT_LLM_MODEL_NAME=None)),
         ):
             result = await add_documents_to_db(
@@ -1058,7 +804,7 @@ class TestAddDocumentsToDb:
 
         with (
             patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
-            patch("src.utils.upsert_source", return_value=1),
+            patch("src.services.document_storage_service.upsert_source", return_value=1),
             patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, DEFAULT_LLM_MODEL_NAME=None)),
         ):
             result = await add_documents_to_db(
@@ -1109,7 +855,7 @@ class TestAddDocumentsToDb:
 
         with (
             patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
-            patch("src.utils.upsert_source", return_value=1),
+            patch("src.services.document_storage_service.upsert_source", return_value=1),
             patch("src.utils.settings", _fake_settings()),
         ):
             result = await add_documents_to_db(session, ["url"], ["content"], [{"source": "x"}], [0])
@@ -1126,7 +872,7 @@ class TestAddDocumentsToDb:
                 "src.utils.generate_contextual_text", new_callable=AsyncMock, return_value=("enriched content", True)
             ) as mock_ctx,
             patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
-            patch("src.utils.upsert_source", return_value=1),
+            patch("src.services.document_storage_service.upsert_source", return_value=1),
             patch(
                 "src.utils.settings",
                 _fake_settings(
@@ -1167,7 +913,7 @@ class TestAddDocumentsToDb:
 
         with (
             patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
-            patch("src.utils.upsert_source", return_value=1),
+            patch("src.services.document_storage_service.upsert_source", return_value=1),
             patch("src.utils.settings", _fake_settings()),
         ):
             await add_documents_to_db(session, ["url"], ["content"], [{"source": "x"}], [0])
@@ -1189,7 +935,7 @@ class TestAddDocumentsToDb:
 
         with (
             patch("src.utils.create_embeddings_batch", side_effect=mock_batch),
-            patch("src.utils.upsert_source", return_value=1),
+            patch("src.services.document_storage_service.upsert_source", return_value=1),
             patch("src.utils.settings", _fake_settings(BATCH_SIZE=2)),
         ):
             result = await add_documents_to_db(session, urls, contents, metas, chunks)
@@ -1205,7 +951,7 @@ class TestAddDocumentsToDb:
 
         with (
             patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
-            patch("src.utils.upsert_source", return_value=1),
+            patch("src.services.document_storage_service.upsert_source", return_value=1),
             patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, DEFAULT_LLM_MODEL_NAME=None)),
         ):
             result = await add_documents_to_db(
@@ -1240,7 +986,7 @@ class TestAddDocumentsToDb:
 
         with (
             patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
-            patch("src.utils.upsert_source", return_value=1),
+            patch("src.services.document_storage_service.upsert_source", return_value=1),
             patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, DEFAULT_LLM_MODEL_NAME=None)),
         ):
             result = await add_documents_to_db(
@@ -1309,7 +1055,7 @@ class TestAddCodeExamplesToDb:
 
         with (
             patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
-            patch("src.utils.upsert_source", return_value=1),
+            patch("src.services.document_storage_service.upsert_source", return_value=1),
         ):
             result = await add_code_examples_to_db(
                 session,
@@ -1354,7 +1100,7 @@ class TestAddCodeExamplesToDb:
 
         with (
             patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
-            patch("src.utils.upsert_source", return_value=1),
+            patch("src.services.document_storage_service.upsert_source", return_value=1),
         ):
             result = await add_code_examples_to_db(session, ["url"], ["code"], [None], [None], [{"source": "x"}], [0])
         assert result == 0
@@ -1371,7 +1117,7 @@ class TestAddCodeExamplesToDb:
 
         with (
             patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
-            patch("src.utils.upsert_source", return_value=1),
+            patch("src.services.document_storage_service.upsert_source", return_value=1),
         ):
             await add_code_examples_to_db(session, ["url"], ["code"], [None], [None], [{"source": "x"}], [0])
         session.rollback.assert_called()
@@ -1385,7 +1131,7 @@ class TestAddCodeExamplesToDb:
 
         with (
             patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
-            patch("src.utils.upsert_source", return_value=1),
+            patch("src.services.document_storage_service.upsert_source", return_value=1),
         ):
             result = await add_code_examples_to_db(
                 session,
@@ -1637,7 +1383,6 @@ class TestRerankResults:
                 "src.utils.settings",
                 _fake_settings(
                     USE_RERANKING=True,
-                    RERANK_LLM_PROVIDER=LLMProvider.OLLAMA,
                     RERANK_LLM_BASE_URL="http://localhost:11434/v1",
                     RERANK_LLM_MODEL_NAME="hf.co/godkingleto/zerank-2-Q4_K_M-GGUF:Q4_K_M",
                 ),
@@ -1664,7 +1409,6 @@ class TestRerankResults:
                 "src.utils.settings",
                 _fake_settings(
                     USE_RERANKING=True,
-                    RERANK_LLM_PROVIDER=LLMProvider.OLLAMA,
                     RERANK_LLM_BASE_URL="http://localhost:11434/v1",
                     RERANK_LLM_MODEL_NAME="hf.co/godkingleto/zerank-2-Q4_K_M-GGUF:Q4_K_M",
                 ),
@@ -1688,7 +1432,6 @@ class TestRerankResults:
                 "src.utils.settings",
                 _fake_settings(
                     USE_RERANKING=True,
-                    RERANK_LLM_PROVIDER=LLMProvider.OLLAMA,
                     RERANK_LLM_BASE_URL="http://localhost:11434/v1",
                     RERANK_LLM_MODEL_NAME="hf.co/godkingleto/zerank-2-Q4_K_M-GGUF:Q4_K_M",
                     DEFAULT_LLM_MAX_RETRIES=2,
@@ -1696,35 +1439,33 @@ class TestRerankResults:
                 ),
             ),
             patch("src.utils.OpenAI", return_value=mock_client),
-            patch("src.utils.time.sleep") as mock_sleep,
         ):
             out = rerank_results("q", results, top_k=2)
 
         assert out[0]["id"] == 2
-        mock_sleep.assert_called_once()
 
 
 class TestParseRerankScores:
     def test_non_string_content_returns_none(self):
         response = MagicMock(choices=[MagicMock(message=MagicMock(content=None))])
-        assert _parse_rerank_scores(response, expected_count=1) is None
+        assert parse_rerank_scores(response, expected_count=1) is None
 
     def test_invalid_json_returns_none(self):
-        assert _rerank_json_payload("{not-json") is None
+        assert rerank_json_payload("{not-json") is None
 
     def test_none_payload_returns_none_scores(self):
-        assert _rerank_score_values(None, expected_count=1) is None
+        assert rerank_score_values(None, expected_count=1) is None
 
 
 class TestResolvedOpenAIApiKey:
     def test_prefers_explicit_key(self):
-        assert _resolved_openai_api_key("sk-real", LLMProvider.OLLAMA) == "sk-real"
+        assert OpenAIConfiguration(api_key="sk-real").resolved_api_key == "sk-real"
 
-    def test_uses_ollama_placeholder_when_provider_is_ollama(self):
-        assert _resolved_openai_api_key(None, LLMProvider.OLLAMA) == "ollama"
+    def test_returns_none_without_key(self):
+        assert OpenAIConfiguration(api_key=None).resolved_api_key is None
 
-    def test_returns_none_without_key_for_openai_provider(self):
-        assert _resolved_openai_api_key(None, LLMProvider.OPENAI) is None
+    def test_returns_none_for_blank_key(self):
+        assert OpenAIConfiguration(api_key="  ").resolved_api_key is None
 
 
 # ---------------------------------------------------------------------------
@@ -1797,7 +1538,7 @@ class TestExtractLinkReferences:
 class TestGetSession:
     def test_yields_session(self):
         mock_session = MagicMock()
-        with patch("src.utils.Session") as mock_cls:
+        with patch("src.models.Session") as mock_cls:
             mock_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
             mock_cls.return_value.__exit__ = MagicMock(return_value=False)
             gen = get_session()
@@ -1839,7 +1580,7 @@ class TestAddDocumentsExtraCoverage:
 
         with (
             patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
-            patch("src.utils.upsert_source", return_value=1),
+            patch("src.services.document_storage_service.upsert_source", return_value=1),
             patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, DEFAULT_LLM_MODEL_NAME=None)),
         ):
             result = await add_documents_to_db(session, ["url"], ["content"], [{"source": "x"}], [0])
@@ -1864,7 +1605,7 @@ class TestAddCodeExamplesExtraCoverage:
 
         with (
             patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
-            patch("src.utils.upsert_source", return_value=1),
+            patch("src.services.document_storage_service.upsert_source", return_value=1),
         ):
             result = await add_code_examples_to_db(
                 session,
@@ -1922,7 +1663,7 @@ class TestSearchDocumentsCore:
 
         with (
             patch("src.utils.create_embedding", new_callable=AsyncMock, return_value=EMBED_Q),
-            patch("src.utils._python_side_vector_search", return_value=[]) as mock_fallback,
+            patch("src.services.search_service._python_side_vector_search", return_value=[]) as mock_fallback,
         ):
             results = await search_documents(session, "query", use_hybrid=False)
 
@@ -2166,26 +1907,26 @@ class TestSearchDocumentsCore:
             assert added_logs[0].source == "code-source.com"
 
     # ---------------------------------------------------------------------------
-    # Tests: _get_db_size_bytes
+    # Tests: get_db_size_bytes
     # ---------------------------------------------------------------------------
 
     class TestGetDbSizeBytes:
         def test_returns_size_from_db(self):
             session = MagicMock()
             session.exec.return_value.first.return_value = (1_234_567,)
-            result = _get_db_size_bytes(session)
+            result = get_db_size_bytes(session)
             assert result == 1_234_567
 
         def test_no_row_returns_zero(self):
             session = MagicMock()
             session.exec.return_value.first.return_value = None
-            result = _get_db_size_bytes(session)
+            result = get_db_size_bytes(session)
             assert result == 0
 
         def test_exception_returns_zero(self):
             session = MagicMock()
             session.exec.side_effect = Exception("db error")
-            result = _get_db_size_bytes(session)
+            result = get_db_size_bytes(session)
             assert result == 0
 
     # ---------------------------------------------------------------------------
@@ -2202,7 +1943,7 @@ class TestSearchDocumentsCore:
 
             with (
                 patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
-                patch("src.utils.upsert_source", return_value=1),
+                patch("src.services.document_storage_service.upsert_source", return_value=1),
                 patch(
                     "src.utils.settings",
                     _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, DEFAULT_LLM_MODEL_NAME=None),
@@ -2243,7 +1984,7 @@ class TestSearchDocumentsCore:
 
             with (
                 patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
-                patch("src.utils.upsert_source", return_value=1),
+                patch("src.services.document_storage_service.upsert_source", return_value=1),
                 patch(
                     "src.utils.settings",
                     _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, DEFAULT_LLM_MODEL_NAME=None),
@@ -2282,7 +2023,7 @@ class TestSearchDocumentsCore:
 
             with (
                 patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
-                patch("src.utils.upsert_source", return_value=1),
+                patch("src.services.document_storage_service.upsert_source", return_value=1),
                 patch(
                     "src.utils.settings",
                     _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, DEFAULT_LLM_MODEL_NAME=None),
@@ -2321,7 +2062,7 @@ class TestSearchDocumentsCore:
 
             with (
                 patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
-                patch("src.utils.upsert_source", return_value=1),
+                patch("src.services.document_storage_service.upsert_source", return_value=1),
             ):
                 result = await add_code_examples_to_db(
                     session,
@@ -2357,7 +2098,7 @@ class TestSearchDocumentsCore:
 
             with (
                 patch("src.utils.create_embeddings_batch", new_callable=AsyncMock, return_value=[EMBED_A]),
-                patch("src.utils.upsert_source", return_value=1),
+                patch("src.services.document_storage_service.upsert_source", return_value=1),
             ):
                 result = await add_code_examples_to_db(
                     session,
@@ -2456,8 +2197,8 @@ class TestUpsertSourceEdgeCases:
         session.exec.return_value.first.return_value = None
         obj_instance = MagicMock()
         obj_instance.id = None
-        with patch("src.utils.Source", return_value=obj_instance):
-            with patch("src.utils.select") as mock_select:
+        with patch("src.services.document_storage_service.Source", return_value=obj_instance):
+            with patch("src.services.document_storage_service.select") as mock_select:
                 mock_select.return_value.where.return_value = MagicMock()
                 with pytest.raises(ValueError, match="Source insert did not return id"):
                     upsert_source(session, "http://example.com")
@@ -2503,7 +2244,7 @@ class TestMergeVectorAndFtsRows:
         ]
         fts_raw = [(1, "u", 0, "c", {}, 0.8)]  # same id → should be skipped
         fts_map = {1: 0.8}
-        merged = _merge_vector_and_fts_rows(vector_results, fts_raw, fts_map)
+        merged = merge_vector_and_fts_rows(vector_results, fts_raw, fts_map)
         assert len(merged) == 1
         assert merged[1]["similarity_score"] == 0.9  # original preserved
 
@@ -2514,7 +2255,7 @@ class TestQueryCodeExampleRows:
     def test_db_error_returns_empty_list(self):
         session = MagicMock()
         session.execute.side_effect = Exception("db error")
-        result = _query_code_example_rows(session, [0.1, 0.2], 5, "{}")
+        result = query_code_example_rows(session, [0.1, 0.2], 5, "{}")
         assert result == []
 
 
@@ -2523,7 +2264,7 @@ class TestCodeExampleRowToResult:
 
     def test_row_converted_to_dict(self):
         row = (42, "https://example.com", 0, "python", "code here", "summary text", {"k": "v"}, 0.95)
-        result = _code_example_row_to_result(row)
+        result = code_example_row_to_result(row)
         assert result["id"] == 42
         assert result["url"] == "https://example.com"
         assert result["language"] == "python"
