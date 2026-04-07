@@ -110,12 +110,6 @@ def _fake_settings(**kw):
         CONTEXTUAL_LLM_MODEL_NAME=None,
         CONTEXTUAL_LLM_MAX_RETRIES=None,
         CONTEXTUAL_LLM_RETRY_DELAY_SECONDS=None,
-        HYBRID_LLM_PROVIDER=None,
-        HYBRID_LLM_API_KEY=None,
-        HYBRID_LLM_BASE_URL=None,
-        HYBRID_LLM_MODEL_NAME=None,
-        HYBRID_LLM_MAX_RETRIES=None,
-        HYBRID_LLM_RETRY_DELAY_SECONDS=None,
         AGENTIC_LLM_PROVIDER=None,
         AGENTIC_LLM_API_KEY=None,
         AGENTIC_LLM_BASE_URL=None,
@@ -134,12 +128,6 @@ def _fake_settings(**kw):
         effective_contextual_model_name=None,
         effective_contextual_max_retries=3,
         effective_contextual_retry_delay_seconds=1.0,
-        effective_hybrid_provider=LLMProvider.OPENAI,
-        effective_hybrid_api_key=None,
-        effective_hybrid_base_url=None,
-        effective_hybrid_model_name=None,
-        effective_hybrid_max_retries=3,
-        effective_hybrid_retry_delay_seconds=1.0,
         effective_agentic_provider=LLMProvider.OPENAI,
         effective_agentic_api_key=None,
         effective_agentic_base_url=None,
@@ -177,18 +165,6 @@ def _fake_settings(**kw):
     defaults["effective_contextual_retry_delay_seconds"] = defaults.get(
         "CONTEXTUAL_LLM_RETRY_DELAY_SECONDS"
     ) or defaults.get("DEFAULT_LLM_RETRY_DELAY_SECONDS")
-    defaults["effective_hybrid_api_key"] = defaults.get("HYBRID_LLM_API_KEY") or defaults.get("DEFAULT_LLM_API_KEY")
-    defaults["effective_hybrid_provider"] = defaults.get("HYBRID_LLM_PROVIDER") or defaults.get("DEFAULT_LLM_PROVIDER")
-    defaults["effective_hybrid_base_url"] = defaults.get("HYBRID_LLM_BASE_URL") or defaults.get("DEFAULT_LLM_BASE_URL")
-    defaults["effective_hybrid_model_name"] = defaults.get("HYBRID_LLM_MODEL_NAME") or defaults.get(
-        "DEFAULT_LLM_MODEL_NAME"
-    )
-    defaults["effective_hybrid_max_retries"] = defaults.get("HYBRID_LLM_MAX_RETRIES") or defaults.get(
-        "DEFAULT_LLM_MAX_RETRIES"
-    )
-    defaults["effective_hybrid_retry_delay_seconds"] = defaults.get("HYBRID_LLM_RETRY_DELAY_SECONDS") or defaults.get(
-        "DEFAULT_LLM_RETRY_DELAY_SECONDS"
-    )
     defaults["effective_agentic_api_key"] = defaults.get("AGENTIC_LLM_API_KEY") or defaults.get("DEFAULT_LLM_API_KEY")
     defaults["effective_agentic_provider"] = defaults.get("AGENTIC_LLM_PROVIDER") or defaults.get(
         "DEFAULT_LLM_PROVIDER"
@@ -409,12 +385,10 @@ class TestSettingsValidation:
             EMBEDDING_PROVIDER="ollama",
             DEFAULT_LLM_PROVIDER="openai",
             CONTEXTUAL_LLM_PROVIDER="ollama",
-            HYBRID_LLM_PROVIDER=None,
             AGENTIC_LLM_PROVIDER="ollama",
             RERANK_LLM_PROVIDER=None,
         )
         assert s.effective_contextual_provider == LLMProvider.OLLAMA
-        assert s.effective_hybrid_provider == LLMProvider.OPENAI
         assert s.effective_agentic_provider == LLMProvider.OLLAMA
         assert s.effective_rerank_provider == LLMProvider.OPENAI
 
@@ -441,19 +415,15 @@ class TestSettingsValidation:
         assert override.effective_rerank_max_retries == 2
         assert override.effective_rerank_retry_delay_seconds == pytest.approx(0.05)
 
-    def test_effective_hybrid_and_agentic_retry_fallbacks_and_overrides(self):
+    def test_effective_agentic_retry_fallbacks_and_overrides(self):
         s = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
             EMBEDDING_PROVIDER="ollama",
             DEFAULT_LLM_MAX_RETRIES=7,
             DEFAULT_LLM_RETRY_DELAY_SECONDS=0.4,
-            HYBRID_LLM_MAX_RETRIES=None,
-            HYBRID_LLM_RETRY_DELAY_SECONDS=None,
             AGENTIC_LLM_MAX_RETRIES=2,
             AGENTIC_LLM_RETRY_DELAY_SECONDS=0.02,
         )
-        assert s.effective_hybrid_max_retries == 7
-        assert s.effective_hybrid_retry_delay_seconds == pytest.approx(0.4)
         assert s.effective_agentic_max_retries == 2
         assert s.effective_agentic_retry_delay_seconds == pytest.approx(0.02)
 

@@ -26,7 +26,7 @@ cp .env.example .env
 4. [Chunking](#chunking)
 5. [Markdown indexing policy](#markdown-indexing-policy)
 6. [RAG feature flags](#rag-feature-flags)
-7. [LLM for contextual embeddings](#llm-for-contextual-embeddings)
+7. [Default and per-feature LLM settings](#default-and-per-feature-llm-settings)
 8. [Server](#server)
 9. [Re-embedding after a model change](#re-embedding-after-a-model-change)
 
@@ -39,13 +39,11 @@ cp .env.example .env
 | `POSTGRES_URL` | — | **yes** | Full SQLAlchemy DSN for the PostgreSQL+pgvector database |
 | `EMBEDDING_PROVIDER` | `ollama` | no | `ollama` or `openai` |
 | `EMBEDDING_DIM` | `768` | no | Vector dimension; must match the chosen model |
-| `OLLAMA_API_URL` | `http://localhost:11434/api/embeddings` | no | Ollama `/api/embeddings` endpoint |
-| `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | no | Ollama model name |
-| `OLLAMA_MAX_RETRIES` | `3` | no | Retry attempts on Ollama network error |
-| `OLLAMA_RETRY_DELAY_SECONDS` | `1.0` | no | Seconds between retry attempts |
-| `OPENAI_API_KEY` | — | if `EMBEDDING_PROVIDER=openai` | OpenAI API key |
-| `OPENAI_EMBED_MODEL` | `text-embedding-3-small` | no | OpenAI embeddings model |
-| `OPENAI_BASE_URL` | — | no | Override base URL for OpenAI-compatible endpoints |
+| `EMBEDDING_BASE_URL` | provider-dependent | no | Embedding endpoint (`/api/embeddings` for Ollama, `/v1` for OpenAI-compatible APIs) |
+| `EMBEDDING_API_KEY` | — | if `EMBEDDING_PROVIDER=openai` | API key for the selected embedding provider |
+| `EMBEDDING_MODEL_NAME` | provider-dependent | no | Embedding model name |
+| `EMBEDDING_MAX_RETRIES` | `3` | no | Retry attempts on embedding request failure |
+| `EMBEDDING_RETRY_DELAY_SECONDS` | `1.0` | no | Seconds between embedding retries |
 | `BATCH_SIZE` | `50` | no | Chunks embedded per batch |
 | `CHUNK_SIZE` | `1000` | no | Target tokens per chunk |
 | `CHUNK_OVERLAP` | `200` | no | Overlap tokens between adjacent chunks |
@@ -54,12 +52,15 @@ cp .env.example .env
 | `MARKDOWN_FALLBACK_ENABLED` | `true` | no | Fall back to raw markdown when fit markdown is empty |
 | `USE_CONTEXTUAL_EMBEDDINGS` | `false` | no | Prepend LLM-generated context to each chunk before embedding |
 | `USE_HYBRID_SEARCH` | `false` | no | Combine vector + full-text search (BM25/tsvector) |
-| `USE_AGENTIC_RAG` | `false` | no | Expose the agentic RAG tool |
+| `USE_AGENTIC_RAG` | `false` | no | Expose the feature-flagged `search_code_examples` tool |
 | `USE_RERANKING` | `false` | no | Cross-encoder re-ranking pass on retrieved results |
-| `LLM_ENABLED` | `false` | no | Enable LLM backend (required for contextual embeddings) |
-| `LLM_API_KEY` | — | if `LLM_ENABLED=true` | API key for the contextual-embedding LLM |
-| `LLM_BASE_URL` | — | if `LLM_ENABLED=true` | Base URL of the LLM API (e.g. OpenRouter) |
-| `LLM_MODEL_NAME` | — | if `LLM_ENABLED=true` | Model identifier (e.g. `anthropic/claude-3-haiku`) |
+| `DEFAULT_LLM_PROVIDER` | `openai` | no | Shared fallback provider for LLM-powered features |
+| `DEFAULT_LLM_BASE_URL` | — | no | Shared fallback base URL for OpenAI-compatible LLM endpoints |
+| `DEFAULT_LLM_API_KEY` | — | no | Shared fallback API key for LLM-powered features |
+| `DEFAULT_LLM_MODEL_NAME` | — | no | Shared fallback model name for LLM-powered features |
+| `CONTEXTUAL_LLM_*` | — | no | Optional overrides used by contextual embeddings |
+| `AGENTIC_LLM_*` | — | no | Preferred shared override bucket used by LLM-based filtering/extraction helpers and agentic-style features |
+| `RERANK_LLM_*` | see `.env.example` | no | Overrides for reranking; may target a local cross-encoder or an OpenAI-compatible scorer |
 | `TRANSPORT` | `sse` | no | MCP transport: `sse` or `stdio` |
 | `HOST` | `0.0.0.0` | no | Bind address for the SSE server |
 | `PORT` | `8051` | no | Port for the SSE server |
@@ -142,8 +143,8 @@ uv run src/crawl4ai_mcp.py
 
 ```env
 EMBEDDING_PROVIDER=ollama
-OLLAMA_API_URL=http://ollama:11434/api/embeddings
-OLLAMA_EMBED_MODEL=nomic-embed-text
+EMBEDDING_BASE_URL=http://ollama:11434/api/embeddings
+EMBEDDING_MODEL_NAME=nomic-embed-text
 EMBEDDING_DIM=768
 ```
 
@@ -151,14 +152,14 @@ The `docker-compose.yml` starts an `ollama` container and pulls `nomic-embed-tex
 
 ### External Ollama instance
 
-To use an Ollama server running on the host machine or elsewhere, override `OLLAMA_API_URL`:
+To use an Ollama server running on the host machine or elsewhere, override `EMBEDDING_BASE_URL`:
 
 ```env
 EMBEDDING_PROVIDER=ollama
-OLLAMA_API_URL=http://host.docker.internal:11434/api/embeddings   # from inside a container
+EMBEDDING_BASE_URL=http://host.docker.internal:11434/api/embeddings   # from inside a container
 # or
-OLLAMA_API_URL=http://192.168.1.50:11434/api/embeddings           # remote host
-OLLAMA_EMBED_MODEL=nomic-embed-text
+EMBEDDING_BASE_URL=http://192.168.1.50:11434/api/embeddings           # remote host
+EMBEDDING_MODEL_NAME=nomic-embed-text
 EMBEDDING_DIM=768
 ```
 
@@ -283,27 +284,70 @@ USE_RERANKING=false
 
 | Flag | Effect when `true` |
 |---|---|
-| `USE_CONTEXTUAL_EMBEDDINGS` | A short LLM-generated context summary is prepended to each chunk before embedding. Requires `LLM_ENABLED=true`. Improves recall at the cost of additional LLM calls per chunk at index time. |
+| `USE_CONTEXTUAL_EMBEDDINGS` | A short LLM-generated context summary is prepended to each chunk before embedding. Requires `CONTEXTUAL_LLM_MODEL_NAME` or `DEFAULT_LLM_MODEL_NAME` to be configured. Improves recall at the cost of additional LLM calls per chunk at index time. |
 | `USE_HYBRID_SEARCH` | Vector similarity search is combined with full-text (tsvector/BM25) search. Improves recall for keyword-heavy queries. The `fts` column is generated automatically; no extra setup required. |
-| `USE_AGENTIC_RAG` | Registers the agentic RAG MCP tool (`search_agentic_rag`). Off by default to avoid exposing a broad-access tool unintentionally. |
+| `USE_AGENTIC_RAG` | Registers the feature-flagged MCP tool `search_code_examples`. Off by default to avoid exposing an extra retrieval surface unintentionally. |
 | `USE_RERANKING` | Applies a cross-encoder re-ranking pass to returned results. Improves precision. Requires a compatible re-ranker model to be available (currently uses the embedding provider). |
 
 ---
 
-## LLM for contextual embeddings
+## Default and per-feature LLM settings
 
-Required only when `USE_CONTEXTUAL_EMBEDDINGS=true`.
+LLM-powered features use a shared fallback plus optional per-feature overrides.
+
+- `DEFAULT_LLM_*` provides the common provider/base URL/API key/model/retry settings.
+- `CONTEXTUAL_LLM_*` overrides are used by contextual embeddings.
+- `AGENTIC_LLM_*` is the preferred shared override bucket currently used by LLM-based content filtering and extraction helpers, and is also available to agentic-style features.
+- `RERANK_LLM_*` overrides are used only by reranking.
+
+There is no separate `HYBRID_LLM_*` setting family; hybrid retrieval is vector search + PostgreSQL full-text search.
+
+### Shared/default LLM example
+
+Use this when you want one OpenAI-compatible LLM configuration reused across features:
 
 ```env
-LLM_ENABLED=true
-LLM_API_KEY=<key>
-LLM_BASE_URL=https://openrouter.ai/api/v1
-LLM_MODEL_NAME=anthropic/claude-3-haiku
+DEFAULT_LLM_PROVIDER=openai
+DEFAULT_LLM_BASE_URL=https://openrouter.ai/api/v1
+DEFAULT_LLM_API_KEY=<key>
+DEFAULT_LLM_MODEL_NAME=anthropic/claude-3-haiku
+DEFAULT_LLM_MAX_RETRIES=3
+DEFAULT_LLM_RETRY_DELAY_SECONDS=1.0
 ```
 
-All three `LLM_*` fields are validated at startup when `LLM_ENABLED=true`; the server will refuse to start if any is missing.
+### Contextual embeddings override example
 
-`LLM_BASE_URL` accepts any OpenAI-compatible API endpoint, including:
+Required only when `USE_CONTEXTUAL_EMBEDDINGS=true` and you do not want to rely on `DEFAULT_LLM_*`.
+
+```env
+USE_CONTEXTUAL_EMBEDDINGS=true
+CONTEXTUAL_LLM_PROVIDER=openai
+CONTEXTUAL_LLM_BASE_URL=https://api.openai.com/v1
+CONTEXTUAL_LLM_API_KEY=<key>
+CONTEXTUAL_LLM_MODEL_NAME=gpt-4o-mini
+```
+
+### Agentic/shared override example
+
+`AGENTIC_LLM_*` does not drive hybrid retrieval and does not power `search_code_examples` directly. Today it is the preferred override bucket for LLM-based content filtering/extraction helpers, and can also be used for agentic-style features.
+
+```env
+AGENTIC_LLM_PROVIDER=ollama
+AGENTIC_LLM_BASE_URL=http://ollama:11434/v1
+AGENTIC_LLM_API_KEY=ollama
+AGENTIC_LLM_MODEL_NAME=llama3.1:8b
+```
+
+### Reranking override example
+
+When `RERANK_LLM_BASE_URL` is unset, `RERANK_LLM_MODEL_NAME` is treated as a local sentence-transformers `CrossEncoder` model name. When `RERANK_LLM_BASE_URL` is set, reranking uses an OpenAI-compatible scoring endpoint.
+
+```env
+USE_RERANKING=true
+RERANK_LLM_MODEL_NAME=cross-encoder/ms-marco-MiniLM-L-6-v2
+```
+
+`*_BASE_URL` accepts any OpenAI-compatible API endpoint, including:
 
 - [OpenRouter](https://openrouter.ai) — `https://openrouter.ai/api/v1`
 - Direct OpenAI — `https://api.openai.com/v1`

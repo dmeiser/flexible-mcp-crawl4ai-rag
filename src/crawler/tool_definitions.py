@@ -419,22 +419,9 @@ def _first_non_empty_string(*values: Optional[str]) -> Optional[str]:
 
 
 def _resolved_llm_config(llm_provider: Optional[str]) -> LLMConfig:
-    provider = (
-        _first_non_empty_string(
-            llm_provider,
-            settings.effective_agentic_model_name,
-            settings.effective_hybrid_model_name,
-        )
-        or "openai/gpt-4o"
-    )
-    api_token = _first_non_empty_string(
-        settings.effective_agentic_api_key,
-        settings.effective_hybrid_api_key,
-    )
-    base_url = _first_non_empty_string(
-        settings.effective_agentic_base_url,
-        settings.effective_hybrid_base_url,
-    )
+    provider = _first_non_empty_string(llm_provider, settings.effective_agentic_model_name) or "openai/gpt-4o"
+    api_token = settings.effective_agentic_api_key
+    base_url = settings.effective_agentic_base_url
     return LLMConfig(provider=provider, api_token=api_token, base_url=base_url)
 
 

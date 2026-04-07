@@ -128,15 +128,7 @@ class Settings(BaseSettings):
     CONTEXTUAL_LLM_MAX_RETRIES: Optional[int] = None
     CONTEXTUAL_LLM_RETRY_DELAY_SECONDS: Optional[float] = None
 
-    # 2. Hybrid search
-    HYBRID_LLM_PROVIDER: Optional[LLMProvider] = None
-    HYBRID_LLM_BASE_URL: Optional[str] = None
-    HYBRID_LLM_API_KEY: Optional[str] = None
-    HYBRID_LLM_MODEL_NAME: Optional[str] = None
-    HYBRID_LLM_MAX_RETRIES: Optional[int] = None
-    HYBRID_LLM_RETRY_DELAY_SECONDS: Optional[float] = None
-
-    # 3. Agentic RAG (requires USE_AGENTIC_RAG=true)
+    # 2. Agentic RAG (requires USE_AGENTIC_RAG=true)
     AGENTIC_LLM_PROVIDER: Optional[LLMProvider] = None
     AGENTIC_LLM_BASE_URL: Optional[str] = None
     AGENTIC_LLM_API_KEY: Optional[str] = None
@@ -144,7 +136,7 @@ class Settings(BaseSettings):
     AGENTIC_LLM_MAX_RETRIES: Optional[int] = None
     AGENTIC_LLM_RETRY_DELAY_SECONDS: Optional[float] = None
 
-    # 4. Reranking (requires USE_RERANKING=true)
+    # 3. Reranking (requires USE_RERANKING=true)
     #    RERANK_LLM_MODEL_NAME also doubles as the local CrossEncoder model name
     #    when no BASE_URL is configured.
     RERANK_LLM_PROVIDER: Optional[LLMProvider] = None
@@ -206,30 +198,6 @@ class Settings(BaseSettings):
     @property
     def effective_contextual_retry_delay_seconds(self) -> float:
         return float(self.CONTEXTUAL_LLM_RETRY_DELAY_SECONDS or self.DEFAULT_LLM_RETRY_DELAY_SECONDS)
-
-    @property
-    def effective_hybrid_base_url(self) -> Optional[str]:
-        return self.HYBRID_LLM_BASE_URL or self.DEFAULT_LLM_BASE_URL
-
-    @property
-    def effective_hybrid_provider(self) -> LLMProvider:
-        return self.HYBRID_LLM_PROVIDER or self.DEFAULT_LLM_PROVIDER
-
-    @property
-    def effective_hybrid_api_key(self) -> Optional[str]:
-        return self.HYBRID_LLM_API_KEY or self.DEFAULT_LLM_API_KEY
-
-    @property
-    def effective_hybrid_model_name(self) -> Optional[str]:
-        return self.HYBRID_LLM_MODEL_NAME or self.DEFAULT_LLM_MODEL_NAME
-
-    @property
-    def effective_hybrid_max_retries(self) -> int:
-        return int(self.HYBRID_LLM_MAX_RETRIES or self.DEFAULT_LLM_MAX_RETRIES)
-
-    @property
-    def effective_hybrid_retry_delay_seconds(self) -> float:
-        return float(self.HYBRID_LLM_RETRY_DELAY_SECONDS or self.DEFAULT_LLM_RETRY_DELAY_SECONDS)
 
     @property
     def effective_agentic_base_url(self) -> Optional[str]:
