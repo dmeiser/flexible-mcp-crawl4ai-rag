@@ -5916,26 +5916,9 @@ async def search_web(
     allowed_domains: Optional[List[str]] = None,
     excluded_domains: Optional[List[str]] = None,
 ) -> str:
-    """Search the live web via OpenRouter web search.
+    """Search the live web via OpenRouter web search."""
 
-    The search engine and maximum result count are controlled by the
-    server-wide ``WEB_SEARCH_DEFAULT_ENGINE`` and
-    ``WEB_SEARCH_DEFAULT_MAX_RESULTS`` settings.
-
-    Domain filtering support depends on the configured engine:
-
-    - **exa** / **parallel**: ``allowed_domains`` and ``excluded_domains``
-      are both supported.
-    - **firecrawl**: domain filtering is **not** supported (a 400 error
-      is returned by OpenRouter).  Any domain filters passed here are
-      silently dropped.
-    - **auto** / **native**: domain filter support varies by upstream
-      provider.
-
-    Only available when USE_WEB_SEARCH=true and valid WEB_SEARCH_*
-    settings are configured.
-    """
-    _ = ctx
+    _refresh_search_web_docstring()
     config_error = _web_search_config_error(query)
     if config_error is not None:
         return config_error
@@ -5951,6 +5934,36 @@ async def search_web(
 
 def _web_search_provider_value() -> str:
     return str(getattr(settings.WEB_SEARCH_PROVIDER, "value", settings.WEB_SEARCH_PROVIDER))
+
+
+def _web_search_engine_docstring_line() -> str:
+    engine = str(getattr(settings, "WEB_SEARCH_DEFAULT_ENGINE", "auto")).strip().lower()
+    if engine in {"exa", "parallel"}:
+        return "Optional: use `allowed_domains` and `excluded_domains` to constrain sources."
+    return ""
+
+
+def _build_search_web_docstring() -> str:
+    lines = ["Search the live web via OpenRouter web search."]
+    domain_filter_line = _web_search_engine_docstring_line()
+    if domain_filter_line:
+        lines.extend(["", domain_filter_line])
+    return "\n".join(lines)
+
+
+def _refresh_search_web_docstring() -> None:
+    search_web.__doc__ = _build_search_web_docstring()
+
+
+_refresh_search_web_docstring()
+
+
+async def search_web_no_domain_filters(
+    ctx: Context,
+    query: str,
+) -> str:
+    """Search the live web via OpenRouter web search."""
+    return await search_web(ctx=ctx, query=query, allowed_domains=None, excluded_domains=None)
 
 
 def _web_search_config_error(query: str) -> Optional[str]:
@@ -5992,34 +6005,50 @@ def _search_web_success_payload(query: str, result: Dict[str, Any], cached: bool
         {
             "success": True,
             "query": query,
-            "answer": result.get("answer", ""),
+            "answer": result.get("answer"),
             "sources": result.get("sources", []),
             "search_params": result.get("search_params", {}),
             "usage": result.get("usage", {}),
-            "model": result.get("model", ""),
+            "model": result.get("model"),
             "cached": cached,
         },
         indent=2,
     )
 
 
-# ---------------------------------------------------------------------------
-# Phase 9.5 / 9.6 — value scoring, eviction, storage budget tools
-# ---------------------------------------------------------------------------
-
-
-def _source_priority_map(session: Session) -> Dict[str, float]:
-    return {sp.source: sp.priority_weight for sp in session.exec(select(SourcePolicy)).all()}
-
-
-def _records_for_scoring(session: Session, model_cls: Any, limit: int) -> List[Any]:
-    return list(session.exec(select(model_cls).where(cast(Any, model_cls.is_active).is_(True)).limit(limit)).all())
-
-
 def _record_source(record: Any, metadata_attr: str) -> str:
     metadata = getattr(record, metadata_attr, {})
     meta = metadata if isinstance(metadata, dict) else {}
     return str(meta.get("source") or "")
+
+
+def _source_priority_value(policy: Any) -> float:
+    try:
+        return float(getattr(policy, "priority_weight", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _source_priority_map(session: Session) -> Dict[str, float]:
+    return {
+        source: _source_priority_value(policy)
+        for policy in session.exec(select(SourcePolicy)).all()
+        if (source := str(getattr(policy, "source", "") or ""))
+    }
+
+
+def _records_for_scoring(session: Session, model_cls: Any, limit: int) -> List[Any]:
+    model_any = cast(Any, model_cls)
+    return list(
+        session.exec(
+            select(model_cls)
+            .where(
+                cast(Any, model_any.is_active).is_(True),
+                model_any.tombstoned_at.is_(None),
+            )
+            .limit(limit)
+        ).all()
+    )
 
 
 def _scored_age_days(record: Any, now: datetime) -> float:

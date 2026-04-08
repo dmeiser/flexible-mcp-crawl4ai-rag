@@ -238,7 +238,10 @@ if settings.USE_AGENTIC_RAG:
     mcp.tool()(tool_definitions.search_code_examples)
 
 if settings.USE_WEB_SEARCH:
-    mcp.tool()(tool_definitions.search_web)
+    if str(settings.WEB_SEARCH_DEFAULT_ENGINE).strip().lower() == "firecrawl":
+        mcp.tool(name="search_web")(tool_definitions.search_web_no_domain_filters)
+    else:
+        mcp.tool()(tool_definitions.search_web)
 
 # Freshness/eviction maintenance remains scheduler-driven and is intentionally
 # not exposed as MCP admin/ops endpoints.

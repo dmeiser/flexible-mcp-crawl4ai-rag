@@ -274,6 +274,80 @@ class TestSearchWeb:
         assert data["success"] is True
         mock_exec.assert_awaited_once_with("query", ["example.com"], ["bad.com"])
 
+    @pytest.mark.asyncio
+    async def test_firecrawl_wrapper_hides_domain_filters(self):
+        ctx = _make_ctx()
+        normalized = {
+            "answer": "Hello",
+            "sources": [],
+            "search_params": {"engine": "firecrawl", "max_results": 5},
+            "usage": {},
+            "model": "openrouter/test-model",
+        }
+        with (
+            patch.object(td.settings, "WEB_SEARCH_PROVIDER", "openrouter"),
+            patch.object(td.settings, "WEB_SEARCH_API_KEY", "secret"),
+            patch.object(td.settings, "WEB_SEARCH_MODEL_NAME", "model"),
+            patch.object(td.settings, "WEB_SEARCH_CACHE_ENABLED", False),
+            patch("src.tools.tool_definitions.execute_web_search", new=AsyncMock(return_value=normalized)) as mock_exec,
+        ):
+            result = await td.search_web_no_domain_filters(ctx, "query")
+        data = json.loads(result)
+        assert data["success"] is True
+        mock_exec.assert_awaited_once_with("query", None, None)
+
+    def test_docstring_updates_with_configured_engine(self):
+        with patch.object(td.settings, "WEB_SEARCH_DEFAULT_ENGINE", "firecrawl"):
+            td._refresh_search_web_docstring()
+            assert td.search_web.__doc__ is not None
+            assert "allowed_domains" not in td.search_web.__doc__
+            assert "excluded_domains" not in td.search_web.__doc__
+            assert "engine" not in td.search_web.__doc__.lower()
+
+        with patch.object(td.settings, "WEB_SEARCH_DEFAULT_ENGINE", "exa"):
+            td._refresh_search_web_docstring()
+            assert td.search_web.__doc__ is not None
+            assert "allowed_domains" in td.search_web.__doc__
+            assert "excluded_domains" in td.search_web.__doc__
+            assert "engine" not in td.search_web.__doc__.lower()
+
+    @pytest.mark.asyncio
+    async def test_execute_web_search_wrapper_forwards_to_service(self):
+        with patch(
+            "src.tools.tool_definitions._service_execute_web_search", new=AsyncMock(return_value={"ok": 1})
+        ) as svc:
+            out = await td.execute_web_search("q", allowed_domains=["x.com"], excluded_domains=["y.com"])
+        assert out == {"ok": 1}
+        svc.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_cache_web_search_results_wrapper_forwards_to_service(self):
+        session = MagicMock()
+        with patch(
+            "src.tools.tool_definitions._service_cache_web_search_results", new=AsyncMock(return_value=2)
+        ) as svc:
+            out = await td.cache_web_search_results(session, {"sources": []})
+        assert out == 2
+        svc.assert_awaited_once()
+
+
+class TestContentFilterObject:
+    def test_llm_filter_builder_branch(self):
+        with patch("src.tools.tool_definitions._llm_filter", return_value="LLM_FILTER"):
+            out = td._content_filter_object(
+                normalized_filter="llm",
+                content_filter_query=None,
+                content_filter_threshold=None,
+                content_filter_instruction="inst",
+                llm_provider="provider",
+            )
+        assert out == "LLM_FILTER"
+
+
+class TestStringHelpers:
+    def test_first_non_empty_string_returns_none_when_all_blank(self):
+        assert td._first_non_empty_string(None, "", "   ") is None
+
 
 class TestSearchDocumentsV2:
     @pytest.mark.asyncio
@@ -614,6 +688,38 @@ def _make_mock_code(
 
 
 class TestComputeValueScores:
+    def test_source_priority_value_parsing(self):
+        policy = MagicMock()
+        policy.priority_weight = "1.75"
+        assert td._source_priority_value(policy) == 1.75
+
+    def test_source_priority_value_fallback_on_invalid(self):
+        policy = MagicMock()
+        policy.priority_weight = "not-a-float"
+        assert td._source_priority_value(policy) == 1.0
+
+    def test_source_priority_map_skips_empty_source_and_uses_fallback(self):
+        good = MagicMock()
+        good.source = "docs.example.com"
+        good.priority_weight = "2.5"
+
+        bad_weight = MagicMock()
+        bad_weight.source = "bad.example.com"
+        bad_weight.priority_weight = "oops"
+
+        empty = MagicMock()
+        empty.source = ""
+        empty.priority_weight = "9"
+
+        session = MagicMock()
+        session.exec.return_value.all.return_value = [good, bad_weight, empty]
+
+        priorities = td._source_priority_map(session)
+
+        assert priorities["docs.example.com"] == 2.5
+        assert priorities["bad.example.com"] == 1.0
+        assert "" not in priorities
+
     @pytest.mark.asyncio
     async def test_updates_pages_and_examples(self):
         ctx = _make_ctx()

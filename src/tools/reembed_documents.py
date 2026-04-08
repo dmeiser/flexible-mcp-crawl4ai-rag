@@ -8,9 +8,9 @@ import logging
 
 from sqlmodel import select
 
-from .config import settings
-from .models import CodeExample, CrawledPage, get_session
-from .utils import create_embedding
+from src.config import settings
+from src.models import CodeExample, CrawledPage, get_session
+from src.utils import create_embedding
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
