@@ -39,7 +39,7 @@ cp .env.example .env
 | `POSTGRES_URL` | — | **yes** | Full SQLAlchemy DSN for the PostgreSQL+pgvector database |
 | `EMBEDDING_DIM` | `768` | no | Vector dimension; must match the chosen model |
 | `EMBEDDING_BASE_URL` | — | no | Base URL for the OpenAI-compatible embedding endpoint |
-| `EMBEDDING_API_KEY` | — | no | API key for the embedding provider (any non-empty value for Ollama) |
+| `EMBEDDING_API_KEY` | — | no | API key for the embedding provider; omit for Ollama |
 | `EMBEDDING_MODEL_NAME` | provider-dependent | no | Embedding model name |
 | `EMBEDDING_MAX_RETRIES` | `3` | no | Retry attempts on embedding request failure |
 | `EMBEDDING_RETRY_DELAY_SECONDS` | `1.0` | no | Seconds between embedding retries |
@@ -56,7 +56,7 @@ cp .env.example .env
 | `USE_WEB_SEARCH` | `false` | no | Expose the feature-flagged `search_web` tool backed by OpenRouter web search |
 | `DEFAULT_LLM_PROVIDER` | `openai` | no | Shared fallback provider for LLM-powered features |
 | `DEFAULT_LLM_BASE_URL` | — | no | Shared fallback base URL for OpenAI-compatible LLM endpoints |
-| `DEFAULT_LLM_API_KEY` | — | no | Shared fallback API key for LLM-powered features |
+| `DEFAULT_LLM_API_KEY` | — | no | Shared fallback API key for LLM-powered features; omit for Ollama |
 | `DEFAULT_LLM_MODEL_NAME` | — | no | Shared fallback model name for LLM-powered features |
 | `CONTEXTUAL_LLM_*` | — | no | Optional overrides used by contextual embeddings |
 | `AGENTIC_LLM_*` | — | no | Preferred shared override bucket used by LLM-based filtering/extraction helpers and agentic-style features |
@@ -140,13 +140,12 @@ uv run src/crawl4ai_mcp.py
 
 ## Embedding provider
 
-All embedding providers are accessed through the OpenAI-compatible client. Set `EMBEDDING_BASE_URL` and `EMBEDDING_API_KEY` to point at any compatible endpoint.
+All embedding providers are accessed through the OpenAI-compatible client. Set `EMBEDDING_BASE_URL` to point at any compatible endpoint, and `EMBEDDING_API_KEY` only when the provider requires one (e.g. OpenAI). Ollama needs no key.
 
 ### Bundled Ollama (default)
 
 ```env
 EMBEDDING_BASE_URL=http://localhost:11434/v1
-EMBEDDING_API_KEY=ollama
 EMBEDDING_MODEL_NAME=nomic-embed-text
 EMBEDDING_DIM=768
 ```
@@ -161,7 +160,6 @@ To use an Ollama server running on the host machine or elsewhere, override `EMBE
 EMBEDDING_BASE_URL=http://host.docker.internal:11434/v1   # from inside a container
 # or
 EMBEDDING_BASE_URL=http://192.168.1.50:11434/v1           # remote host
-EMBEDDING_API_KEY=ollama
 EMBEDDING_MODEL_NAME=nomic-embed-text
 EMBEDDING_DIM=768
 ```
@@ -329,7 +327,6 @@ CONTEXTUAL_LLM_MODEL_NAME=gpt-4o-mini
 ```env
 AGENTIC_LLM_PROVIDER=ollama
 AGENTIC_LLM_BASE_URL=http://ollama:11434/v1
-AGENTIC_LLM_API_KEY=ollama
 AGENTIC_LLM_MODEL_NAME=llama3.1:8b
 ```
 

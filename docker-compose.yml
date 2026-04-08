@@ -13,9 +13,7 @@ services:
     environment:
       - POSTGRES_URL=postgresql://${POSTGRES_USER:-raguser}:${POSTGRES_PASSWORD:-ragpassword}@rag-db:5432/${POSTGRES_DB:-ragdb}
       - EMBEDDING_BASE_URL=http://ollama:11434/v1
-      - EMBEDDING_API_KEY=ollama
       - DEFAULT_LLM_BASE_URL=http://ollama:11434/v1
-      - DEFAULT_LLM_API_KEY=ollama
     depends_on:
       rag-db:
         condition: service_healthy

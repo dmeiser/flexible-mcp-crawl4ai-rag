@@ -47,7 +47,7 @@ class OpenAICompatibleEndpoint:
         self._sync_chat_retry_fn = sync_chat_retry_fn
 
     def _client_kwargs(self) -> Dict[str, Any]:
-        kwargs: Dict[str, Any] = {"api_key": self.api_key}
+        kwargs: Dict[str, Any] = {"api_key": self.api_key or ""}
         if self.base_url:
             kwargs["base_url"] = self.base_url
         return kwargs

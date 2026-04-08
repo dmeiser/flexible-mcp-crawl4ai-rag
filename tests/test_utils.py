@@ -545,7 +545,7 @@ class TestOpenAIEmbedding:
         ):
             await _create_openai_embedding("hello")
         call_kwargs = MockOA.call_args[1]
-        assert call_kwargs.get("api_key") is None
+        assert call_kwargs.get("api_key") == ""
         assert call_kwargs.get("base_url") == "http://ollama:11434/v1"
 
     @pytest.mark.asyncio
@@ -654,7 +654,7 @@ class TestContextualText:
             _text, _enriched = await generate_contextual_text("full doc", "chunk text")
 
         kwargs = mock_async_openai.call_args[1]
-        assert kwargs["api_key"] is None
+        assert kwargs["api_key"] == ""
         assert kwargs["base_url"] == "http://ollama:11434/v1"
 
     @pytest.mark.asyncio
