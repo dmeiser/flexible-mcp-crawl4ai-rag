@@ -1,5 +1,6 @@
 import os
 import runpy
+import logging
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -66,31 +67,37 @@ class _DummySyncClient:
 
 
 @pytest.mark.asyncio
-async def test_openai_endpoint_chat_completion_paths_and_close():
+async def test_openai_endpoint_chat_completion_paths_and_close(caplog):
     endpoint = OpenAICompatibleEndpoint(
         OpenAIConfiguration(api_key="k", base_url="http://x"),
         async_openai_cls=_DummyAsyncClient,
         openai_cls=_DummySyncClient,
     )
-    out_async = await endpoint.chat_completion(
-        request_kwargs={"model": "m", "messages": []},
-        max_retries=1,
-        retry_delay_seconds=0.0,
-        call_name="chat",
-    )
+    with caplog.at_level(logging.DEBUG, logger="src.providers.openai_stack"):
+        out_async = await endpoint.chat_completion(
+            request_kwargs={"model": "m", "messages": []},
+            max_retries=1,
+            retry_delay_seconds=0.0,
+            call_name="chat",
+        )
     assert out_async["ok"] is True
 
-    out_sync = endpoint.chat_completion_sync(
-        request_kwargs={"model": "m", "messages": []},
-        max_retries=1,
-        retry_delay_seconds=0.0,
-        call_name="chat-sync",
-    )
+    with caplog.at_level(logging.DEBUG, logger="src.providers.openai_stack"):
+        out_sync = endpoint.chat_completion_sync(
+            request_kwargs={"model": "m", "messages": []},
+            max_retries=1,
+            retry_delay_seconds=0.0,
+            call_name="chat-sync",
+        )
     assert out_sync["ok"] is True
+    assert "chat completion request:" in caplog.text
+    assert "chat completion response:" in caplog.text
+    assert "chat completion sync request:" in caplog.text
+    assert "chat completion sync response:" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_openai_endpoint_chat_completion_raw_and_no_base_url_error():
+async def test_openai_endpoint_chat_completion_raw_and_no_base_url_error(caplog):
     endpoint_no_base = OpenAICompatibleEndpoint(OpenAIConfiguration(api_key="k", base_url=None))
     with pytest.raises(ValueError):
         await endpoint_no_base.chat_completion_raw(
@@ -101,7 +108,10 @@ async def test_openai_endpoint_chat_completion_raw_and_no_base_url_error():
         )
 
     endpoint = OpenAICompatibleEndpoint(OpenAIConfiguration(api_key="k", base_url="http://x"))
-    with patch("src.providers.openai_stack._raw_chat_completion_with_retries", new=AsyncMock(return_value={"ok": 1})):
+    with (
+        caplog.at_level(logging.DEBUG, logger="src.providers.openai_stack"),
+        patch("src.providers.openai_stack._raw_chat_completion_with_retries", new=AsyncMock(return_value={"ok": 1})),
+    ):
         raw = await endpoint.chat_completion_raw(
             payload={"a": 1},
             max_retries=1,
@@ -109,6 +119,9 @@ async def test_openai_endpoint_chat_completion_raw_and_no_base_url_error():
             call_name="raw",
         )
     assert raw == {"ok": 1}
+    assert "raw chat completion request:" in caplog.text
+    assert "raw chat completion headers:" in caplog.text
+    assert "***REDACTED***" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -154,6 +167,7 @@ async def test_retry_strategies_and_raw_helpers():
 
     assert oas._raw_chat_headers("k")["Authorization"].startswith("Bearer")
     assert "Authorization" not in oas._raw_chat_headers(None)
+    assert oas._redacted_headers({"Authorization": "Bearer secret"})["Authorization"].endswith("***REDACTED***")
 
 
 @pytest.mark.asyncio
@@ -221,7 +235,7 @@ async def test_raw_chat_attempt_and_completion_retry_exhaustion():
 
 
 @pytest.mark.asyncio
-async def test_openrouter_web_search_adapter_and_helpers():
+async def test_openrouter_web_search_adapter_and_helpers(caplog):
     conf = OpenAIConfiguration(api_key="k", base_url="http://x", max_retries=1, retry_delay_seconds=0.0)
     endpoint = SimpleNamespace(
         chat_completion_raw=AsyncMock(
@@ -238,9 +252,14 @@ async def test_openrouter_web_search_adapter_and_helpers():
         model_name="m",
         endpoint_factory=lambda *_args: endpoint,
     )
-    out = await adapter.search("q", "auto", 5, ["a.com"], ["b.com"])
+    with caplog.at_level(logging.DEBUG, logger="src.providers.openrouter_web_search"):
+        out = await adapter.search("q", "auto", 5, ["a.com"], ["b.com"])
     assert out["answer"] == "answer"
     assert out["sources"][0]["url"] == "https://a"
+    assert "OpenRouter web search request payload:" in caplog.text
+    assert "OpenRouter web search raw response:" in caplog.text
+    assert '"content": "q"' in caplog.text
+    assert '"citations"' in caplog.text
 
     with pytest.raises(ValueError):
         bad = OpenRouterWebSearchAdapter(

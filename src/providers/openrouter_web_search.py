@@ -4,10 +4,15 @@ OpenRouter web search provider built on the OpenAI-compatible base.
 
 from __future__ import annotations
 
+import json
+import logging
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Optional
 
 from src.providers.openai_stack import OpenAICompatibleEndpoint, OpenAIConfiguration
+
+
+logger = logging.getLogger(__name__)
 
 
 class WebSearchModel(ABC):
@@ -67,6 +72,11 @@ class OpenRouterWebSearchAdapter(WebSearchModel):
             allowed_domains=allowed_domains,
             excluded_domains=excluded_domains,
         )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "OpenRouter web search request payload: %s",
+                json.dumps(payload, default=str, ensure_ascii=False, sort_keys=True),
+            )
         endpoint = self._endpoint_factory(
             self._configuration.resolved_api_key,
             self._configuration.base_url,
@@ -77,6 +87,11 @@ class OpenRouterWebSearchAdapter(WebSearchModel):
             retry_delay_seconds=self._configuration.retry_delay_seconds,
             call_name="OpenRouter web search",
         )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "OpenRouter web search raw response: %s",
+                json.dumps(raw, default=str, ensure_ascii=False, sort_keys=True),
+            )
         return normalize_openrouter_web_search_result(
             raw=raw,
             query=query,
