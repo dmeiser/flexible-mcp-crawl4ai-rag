@@ -11,7 +11,6 @@ from typing import Any, Callable, Dict, List, Optional
 
 from src.providers.openai_stack import OpenAICompatibleEndpoint, OpenAIConfiguration
 
-
 logger = logging.getLogger(__name__)
 
 

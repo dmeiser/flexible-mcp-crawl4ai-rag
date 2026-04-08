@@ -9,7 +9,6 @@ from typing import Any, Callable, Dict, List, Optional
 import httpx
 from openai import AsyncOpenAI, OpenAI
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -270,6 +269,7 @@ async def _raw_chat_completion_with_retries(
                 attempt=attempt,
                 attempts=attempts,
                 retry_delay_seconds=retry_delay_seconds,
+                timeout_seconds=timeout_seconds,
             )
             if maybe_raw is not None:
                 _log_debug_payload("raw chat completion response", maybe_raw)
@@ -286,17 +286,55 @@ async def _raw_chat_attempt(
     attempt: int,
     attempts: int,
     retry_delay_seconds: float,
+    timeout_seconds: float,
 ) -> Optional[Dict[str, Any]]:
     try:
         resp = await client.post(url, headers=headers, json=payload)
         resp.raise_for_status()
-        raw = resp.json()
+        _maybe_log_raw_response_headers(resp, attempt)
+        raw = await _read_raw_response_payload(resp, attempt, timeout_seconds)
         return raw if isinstance(raw, dict) else {}
     except Exception:
         if attempt >= attempts:
             raise
         await asyncio.sleep(_retry_backoff_seconds(float(retry_delay_seconds), attempt))
         return None
+
+
+def _maybe_log_raw_response_headers(resp: Any, attempt: int) -> None:
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    _log_debug_payload(
+        "raw chat completion response headers",
+        {
+            "status_code": getattr(resp, "status_code", None),
+            "headers": dict(getattr(resp, "headers", {})),
+            "attempt": attempt,
+        },
+    )
+
+
+async def _read_raw_response_payload(resp: Any, attempt: int, timeout_seconds: float) -> Any:
+    if not hasattr(resp, "aread"):
+        return resp.json()
+
+    body_bytes = await asyncio.wait_for(resp.aread(), timeout=max(1.0, float(timeout_seconds)))
+    body_text = body_bytes.decode("utf-8", errors="replace")
+    _maybe_log_raw_response_body_preview(body_bytes, body_text, attempt)
+    return json.loads(body_text)
+
+
+def _maybe_log_raw_response_body_preview(body_bytes: bytes, body_text: str, attempt: int) -> None:
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    _log_debug_payload(
+        "raw chat completion response body preview",
+        {
+            "bytes": len(body_bytes),
+            "preview": body_text[:4000],
+            "attempt": attempt,
+        },
+    )
 
 
 def _retry_backoff_seconds(base_delay_seconds: float, attempt: int) -> float:

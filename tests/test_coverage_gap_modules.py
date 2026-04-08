@@ -1,6 +1,6 @@
+import logging
 import os
 import runpy
-import logging
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -170,6 +170,12 @@ async def test_retry_strategies_and_raw_helpers():
     assert oas._redacted_headers({"Authorization": "Bearer secret"})["Authorization"].endswith("***REDACTED***")
 
 
+def test_raw_response_body_preview_noop_when_not_debug(caplog):
+    with caplog.at_level(logging.INFO, logger="src.providers.openai_stack"):
+        oas._maybe_log_raw_response_body_preview(b"abc", "abc", 1)
+    assert "raw chat completion response body preview" not in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_raw_chat_attempt_and_completion_retry_exhaustion():
     resp = SimpleNamespace(raise_for_status=lambda: None, json=lambda: [1, 2, 3])
@@ -182,6 +188,7 @@ async def test_raw_chat_attempt_and_completion_retry_exhaustion():
         attempt=1,
         attempts=1,
         retry_delay_seconds=0.0,
+        timeout_seconds=1.0,
     )
     assert got == {}
 
@@ -195,6 +202,7 @@ async def test_raw_chat_attempt_and_completion_retry_exhaustion():
             attempt=1,
             attempts=2,
             retry_delay_seconds=0.0,
+            timeout_seconds=1.0,
         )
     assert got2 is None
 
@@ -231,7 +239,40 @@ async def test_raw_chat_attempt_and_completion_retry_exhaustion():
             attempt=1,
             attempts=1,
             retry_delay_seconds=0.0,
+            timeout_seconds=1.0,
         )
+
+
+@pytest.mark.asyncio
+async def test_raw_chat_attempt_reads_body_bytes_and_logs_debug(caplog):
+    class _Resp:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+        @staticmethod
+        async def aread():
+            return b'{"ok": 42}'
+
+    client = SimpleNamespace(post=AsyncMock(return_value=_Resp()))
+    with caplog.at_level(logging.DEBUG, logger="src.providers.openai_stack"):
+        got = await oas._raw_chat_attempt(
+            client=client,
+            url="http://x",
+            headers={},
+            payload={},
+            attempt=1,
+            attempts=1,
+            retry_delay_seconds=0.0,
+            timeout_seconds=1.0,
+        )
+
+    assert got == {"ok": 42}
+    assert "raw chat completion response headers" in caplog.text
+    assert "raw chat completion response body preview" in caplog.text
 
 
 @pytest.mark.asyncio
