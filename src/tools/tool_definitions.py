@@ -46,7 +46,6 @@ from src.services.content_extraction import extract_code_blocks, extract_link_re
 from src.services.document_storage_service import (
     add_code_examples_to_db,
     add_documents_to_db,
-    upsert_source,
 )
 from src.services.ingestion import store_crawled_documents
 from src.services.metadata_extractor import (
@@ -64,37 +63,9 @@ from src.services.web_crawler import (
     chunk_text_according_to_settings,
     crawl_recursive_internal_links,
 )
-from src.services.web_search_service import cache_web_search_results as _service_cache_web_search_results
-from src.services.web_search_service import execute_web_search as _service_execute_web_search
-from src.utils import _openai_compatible_endpoint, create_embedding
+from src.utils import create_embedding
 
 logger = logging.getLogger(__name__)
-
-
-async def execute_web_search(
-    query: str,
-    allowed_domains: Optional[List[str]] = None,
-    excluded_domains: Optional[List[str]] = None,
-) -> Dict[str, Any]:
-    return await _service_execute_web_search(
-        settings=settings,
-        endpoint_factory=_openai_compatible_endpoint,
-        query=query,
-        allowed_domains=allowed_domains,
-        excluded_domains=excluded_domains,
-    )
-
-
-async def cache_web_search_results(session: Session, result: Dict[str, Any]) -> int:
-    return await _service_cache_web_search_results(
-        session=session,
-        result=result,
-        settings=settings,
-        upsert_source_fn=upsert_source,
-        crawled_page_cls=CrawledPage,
-        content_class_text="text",
-        embedding_dim=int(settings.EMBEDDING_DIM),
-    )
 
 
 _ALLOWED_RUN_CONFIG_FIELDS = {
@@ -5907,112 +5878,6 @@ async def search_fit_markdown(
         fresh_only=fresh_only,
         recency_bias=recency_bias,
         include_provenance=include_provenance,
-    )
-
-
-async def search_web(
-    ctx: Context,
-    query: str,
-    allowed_domains: Optional[List[str]] = None,
-    excluded_domains: Optional[List[str]] = None,
-) -> str:
-    """Search the live web via OpenRouter web search."""
-
-    _refresh_search_web_docstring()
-    config_error = _web_search_config_error(query)
-    if config_error is not None:
-        return config_error
-
-    try:
-        result = await execute_web_search(query, allowed_domains, excluded_domains)
-        cached = await _maybe_cache_web_search_result(result)
-        return _search_web_success_payload(query, result, cached)
-    except Exception as exc:
-        logger.error(f"search_web: {exc}", exc_info=True)
-        return json.dumps({"success": False, "query": query, "error": str(exc)}, indent=2)
-
-
-def _web_search_provider_value() -> str:
-    return str(getattr(settings.WEB_SEARCH_PROVIDER, "value", settings.WEB_SEARCH_PROVIDER))
-
-
-def _web_search_engine_docstring_line() -> str:
-    engine = str(getattr(settings, "WEB_SEARCH_DEFAULT_ENGINE", "auto")).strip().lower()
-    if engine in {"exa", "parallel"}:
-        return "Optional: use `allowed_domains` and `excluded_domains` to constrain sources."
-    return ""
-
-
-def _build_search_web_docstring() -> str:
-    lines = ["Search the live web via OpenRouter web search."]
-    domain_filter_line = _web_search_engine_docstring_line()
-    if domain_filter_line:
-        lines.extend(["", domain_filter_line])
-    return "\n".join(lines)
-
-
-def _refresh_search_web_docstring() -> None:
-    search_web.__doc__ = _build_search_web_docstring()
-
-
-_refresh_search_web_docstring()
-
-
-async def search_web_no_domain_filters(
-    ctx: Context,
-    query: str,
-) -> str:
-    """Search the live web via OpenRouter web search."""
-    return await search_web(ctx=ctx, query=query, allowed_domains=None, excluded_domains=None)
-
-
-def _web_search_config_error(query: str) -> Optional[str]:
-    provider = _web_search_provider_value()
-    if provider != "openrouter":
-        return None
-    if not settings.WEB_SEARCH_API_KEY:
-        return _search_web_error_payload(
-            query,
-            "WEB_SEARCH_API_KEY is not configured for WEB_SEARCH_PROVIDER=openrouter. "
-            "Set WEB_SEARCH_API_KEY and WEB_SEARCH_MODEL_NAME.",
-        )
-    if not settings.WEB_SEARCH_MODEL_NAME:
-        return _search_web_error_payload(
-            query,
-            "WEB_SEARCH_MODEL_NAME is not configured for WEB_SEARCH_PROVIDER=openrouter. "
-            "Set WEB_SEARCH_API_KEY and WEB_SEARCH_MODEL_NAME.",
-        )
-    return None
-
-
-def _search_web_error_payload(query: str, error: str) -> str:
-    return json.dumps({"success": False, "query": query, "error": error}, indent=2)
-
-
-async def _maybe_cache_web_search_result(result: Dict[str, Any]) -> bool:
-    if not settings.WEB_SEARCH_CACHE_ENABLED:
-        return False
-    try:
-        with next(get_session()) as session:
-            return await cache_web_search_results(session, result) > 0
-    except Exception as cache_exc:
-        logger.warning(f"search_web cache write failed: {cache_exc}", exc_info=True)
-        return False
-
-
-def _search_web_success_payload(query: str, result: Dict[str, Any], cached: bool) -> str:
-    return json.dumps(
-        {
-            "success": True,
-            "query": query,
-            "answer": result.get("answer"),
-            "sources": result.get("sources", []),
-            "search_params": result.get("search_params", {}),
-            "usage": result.get("usage", {}),
-            "model": result.get("model"),
-            "cached": cached,
-        },
-        indent=2,
     )
 
 

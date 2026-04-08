@@ -53,7 +53,6 @@ cp .env.example .env
 | `USE_HYBRID_SEARCH` | `false` | no | Combine vector + full-text search (BM25/tsvector) |
 | `USE_AGENTIC_RAG` | `false` | no | Expose the feature-flagged `search_code_examples` tool |
 | `USE_RERANKING` | `false` | no | Cross-encoder re-ranking pass on retrieved results |
-| `USE_WEB_SEARCH` | `false` | no | Expose the feature-flagged `search_web` tool backed by OpenRouter web search |
 | `DEFAULT_LLM_PROVIDER` | `openai` | no | Shared fallback provider for LLM-powered features |
 | `DEFAULT_LLM_BASE_URL` | — | no | Shared fallback base URL for OpenAI-compatible LLM endpoints |
 | `DEFAULT_LLM_API_KEY` | — | no | Shared fallback API key for LLM-powered features; omit for Ollama |
@@ -61,7 +60,6 @@ cp .env.example .env
 | `CONTEXTUAL_LLM_*` | — | no | Optional overrides used by contextual embeddings |
 | `AGENTIC_LLM_*` | — | no | Preferred shared override bucket used by LLM-based filtering/extraction helpers and agentic-style features |
 | `RERANK_LLM_*` | see `.env.example` | no | Overrides for reranking; may target a local cross-encoder or an OpenAI-compatible scorer |
-| `WEB_SEARCH_*` | see `.env.example` | no | Provider-dispatched web search configuration, request defaults, and optional short-TTL cache settings |
 | `TRANSPORT` | `sse` | no | MCP transport: `sse` or `stdio` |
 | `HOST` | `0.0.0.0` | no | Bind address for the SSE server |
 | `PORT` | `8051` | no | Port for the SSE server |
@@ -270,7 +268,6 @@ USE_CONTEXTUAL_EMBEDDINGS=false
 USE_HYBRID_SEARCH=false
 USE_AGENTIC_RAG=false
 USE_RERANKING=false
-USE_WEB_SEARCH=false
 ```
 
 | Flag | Effect when `true` |
@@ -279,7 +276,6 @@ USE_WEB_SEARCH=false
 | `USE_HYBRID_SEARCH` | Vector similarity search is combined with full-text (tsvector/BM25) search. Improves recall for keyword-heavy queries. The `fts` column is generated automatically; no extra setup required. |
 | `USE_AGENTIC_RAG` | Registers the feature-flagged MCP tool `search_code_examples`. Off by default to avoid exposing an extra retrieval surface unintentionally. |
 | `USE_RERANKING` | Applies a cross-encoder re-ranking pass to returned results. Improves precision. Requires a compatible re-ranker model to be available (currently uses the embedding provider). |
-| `USE_WEB_SEARCH` | Registers the feature-flagged MCP tool `search_web`, which calls OpenRouter's `openrouter:web_search` server tool. Optional caching stores short-lived web-lead records for crawl/recrawl workflows, not normal document retrieval. |
 
 ---
 
@@ -291,7 +287,6 @@ LLM-powered features use a shared fallback plus optional per-feature overrides.
 - `CONTEXTUAL_LLM_*` overrides are used by contextual embeddings.
 - `AGENTIC_LLM_*` is the preferred shared override bucket currently used by LLM-based content filtering and extraction helpers, and is also available to agentic-style features.
 - `RERANK_LLM_*` overrides are used only by reranking.
-- `WEB_SEARCH_*` configures the separate provider-dispatched live web search tool and its optional ephemeral cache.
 
 There is no separate `HYBRID_LLM_*` setting family; hybrid retrieval is vector search + PostgreSQL full-text search.
 
@@ -345,44 +340,6 @@ RERANK_LLM_MODEL_NAME=cross-encoder/ms-marco-MiniLM-L-6-v2
 - Direct OpenAI — `https://api.openai.com/v1`
 - Local LM Studio — `http://localhost:1234/v1`
 - Ollama OpenAI endpoint — `http://localhost:11434/v1`
-
-### Web search
-
-`search_web` is a separate MCP tool backed by [OpenRouter's `openrouter:web_search` server tool](https://openrouter.ai/docs/guides/features/server-tools/web-search). The settings surface is structured so future providers can be added behind the same tool contract.
-
-**How it works:** a chat completion request is sent to the LLM specified by `WEB_SEARCH_MODEL_NAME` on OpenRouter, with `openrouter:web_search` attached as a server tool. The LLM decides whether a web search is needed, OpenRouter executes the search, and the LLM synthesises an answer grounded in the results. The model may search multiple times in a single request.
-
-`WEB_SEARCH_MODEL_NAME` is any chat model hosted on OpenRouter (e.g. `openai/gpt-4o-mini`, `anthropic/claude-sonnet-4`, `google/gemini-2.0-flash-001`). This is the LLM that processes and answers the query — it is **not** a search-engine identifier.
-
-The `engine` and `max_results` parameters can be overridden per `search_web` invocation by the caller; the `WEB_SEARCH_DEFAULT_*` settings provide fallback defaults. Available engines: `auto` (default — uses provider-native search when available, falls back to Exa), `native`, `exa`, `firecrawl`, `parallel`.
-
-Example configuration:
-
-```env
-USE_WEB_SEARCH=true
-WEB_SEARCH_PROVIDER=openrouter
-WEB_SEARCH_BASE_URL=https://openrouter.ai/api/v1
-WEB_SEARCH_API_KEY=<your-openrouter-key>
-WEB_SEARCH_MODEL_NAME=openai/gpt-4o-mini
-```
-
-Optional ephemeral cache:
-
-```env
-WEB_SEARCH_CACHE_ENABLED=true
-WEB_SEARCH_CACHE_TTL_HOURS=24
-WEB_SEARCH_CACHE_SOURCE=openrouter_web_search
-```
-
-Cached web-search rows are intentionally stored outside normal retrieval flow:
-
-- they are persisted as short-lived crawl/recrawl leads,
-- they are marked inactive so `search_documents` does not return them by default,
-- they carry explicit expiry metadata and are pruned automatically on later cache writes.
-
-As additional providers are implemented later, they should plug into the same `search_web` tool and `WEB_SEARCH_PROVIDER` switch rather than creating parallel MCP tools.
-
----
 
 ## Server
 

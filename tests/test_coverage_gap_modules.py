@@ -1,7 +1,6 @@
 import logging
 import os
 import runpy
-from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,39 +13,11 @@ os.environ.setdefault("EMBEDDING_MODEL_NAME", "nomic-embed-text")
 os.environ.setdefault("EMBEDDING_DIM", "4")
 
 from src.config import Settings
-from src.models import CrawledPage
 from src.providers import openai_stack as oas
 from src.providers.openai_stack import EmbeddingsProvider, OpenAICompatibleEndpoint, OpenAIConfiguration
-from src.providers.openrouter_web_search import (
-    OpenRouterWebSearchAdapter,
-    _citation_source_from_dict,
-    _citation_to_source,
-    _extract_openrouter_answer,
-    _extract_openrouter_usage,
-    _extract_sources_from_openrouter_response,
-    _openrouter_web_search_payload,
-    normalize_openrouter_web_search_result,
-    web_search_model,
-)
 from src.services.contextual_enrichment_service import ContextualEnrichmentService
 from src.services.embedding_service import EmbeddingService
 from src.services.retrieval import search_documents_with_embedding
-from src.services.web_search_service import (
-    WebSearchService,
-    _as_web_search_source_item,
-    _build_single_web_search_cache_row,
-    _commit_web_search_cache_rows,
-    _delete_web_search_cache_rows,
-    _is_expired_web_cache_row,
-    _normalized_web_search_cache_fields,
-    _prune_expired_web_search_cache,
-    _row_cache_source,
-    _row_expires_before,
-    _web_search_cache_content,
-    _web_search_cache_page_metadata,
-    _web_search_cache_retrieval_metadata,
-    _web_search_sources,
-)
 from src.tools import reembed_documents as reembed
 from src.utils import _context_prompt
 
@@ -276,249 +247,6 @@ async def test_raw_chat_attempt_reads_body_bytes_and_logs_debug(caplog):
 
 
 @pytest.mark.asyncio
-async def test_openrouter_web_search_adapter_and_helpers(caplog):
-    conf = OpenAIConfiguration(api_key="k", base_url="http://x", max_retries=1, retry_delay_seconds=0.0)
-    endpoint = SimpleNamespace(
-        chat_completion_raw=AsyncMock(
-            return_value={
-                "choices": [{"message": {"content": "answer"}}],
-                "citations": ["https://a"],
-                "usage": {"t": 1},
-                "model": "m",
-            }
-        )
-    )
-    adapter = OpenRouterWebSearchAdapter(
-        configuration=conf,
-        model_name="m",
-        endpoint_factory=lambda *_args: endpoint,
-    )
-    with caplog.at_level(logging.DEBUG, logger="src.providers.openrouter_web_search"):
-        out = await adapter.search("q", "auto", 5, ["a.com"], ["b.com"])
-    assert out["answer"] == "answer"
-    assert out["sources"][0]["url"] == "https://a"
-    assert "OpenRouter web search request payload:" in caplog.text
-    assert "OpenRouter web search raw response:" in caplog.text
-    assert '"content": "q"' in caplog.text
-    assert '"citations"' in caplog.text
-
-    with pytest.raises(ValueError):
-        bad = OpenRouterWebSearchAdapter(
-            configuration=OpenAIConfiguration(api_key=None, base_url="http://x"),
-            model_name="m",
-            endpoint_factory=lambda *_args: endpoint,
-        )
-        await bad.search("q", "auto", 5, None, None)
-
-    with pytest.raises(ValueError):
-        bad2 = OpenRouterWebSearchAdapter(
-            configuration=conf,
-            model_name="",
-            endpoint_factory=lambda *_args: endpoint,
-        )
-        await bad2.search("q", "auto", 5, None, None)
-
-    payload = _openrouter_web_search_payload(
-        model_name="m",
-        query="q",
-        engine="auto",
-        max_results=3,
-        allowed_domains=["x.com"],
-        excluded_domains=["y.com"],
-    )
-    assert payload["tools"][0]["parameters"]["allowed_domains"] == ["x.com"]
-
-    normalized = normalize_openrouter_web_search_result(
-        raw={
-            "choices": [{"message": {"content": "ok"}}],
-            "citations": [{"url": "u", "title": "t", "text": "s"}],
-            "usage": {"p": 1},
-        },
-        query="q",
-        engine="auto",
-        max_results=2,
-        default_model_name="def",
-    )
-    assert normalized["answer"] == "ok"
-    assert normalized["sources"][0]["snippet"] == "s"
-
-    assert _extract_openrouter_answer({}) == ""
-    assert _extract_openrouter_usage({"usage": []}) == {}
-    assert _extract_sources_from_openrouter_response({"citations": "x"}) == []
-    assert _citation_to_source(1, "https://z")["url"] == "https://z"
-    assert _citation_to_source(1, {"title": "no-url"}) is None
-    assert _citation_source_from_dict(1, {"url": "u", "title": "t", "snippet": "s"})["title"] == "t"
-
-    assert isinstance(
-        web_search_model(
-            provider="openrouter",
-            configuration=conf,
-            model_name="m",
-            endpoint_factory=lambda *_args: endpoint,
-        ),
-        OpenRouterWebSearchAdapter,
-    )
-    with pytest.raises(ValueError):
-        web_search_model(
-            provider="other",
-            configuration=conf,
-            model_name="m",
-            endpoint_factory=lambda *_args: endpoint,
-        )
-
-
-@pytest.mark.asyncio
-async def test_web_search_service_execute_and_cache_paths():
-    model = SimpleNamespace(search=AsyncMock(return_value={"sources": [], "answer": "a"}))
-    settings = SimpleNamespace(
-        WEB_SEARCH_API_KEY="k",
-        effective_web_search_base_url="http://x",
-        effective_web_search_max_retries=1,
-        effective_web_search_retry_delay_seconds=0.0,
-        WEB_SEARCH_DEFAULT_ENGINE="firecrawl",
-        WEB_SEARCH_DEFAULT_MAX_RESULTS=0,
-        effective_web_search_provider="openrouter",
-        effective_web_search_model_name="m",
-    )
-    with patch("src.services.web_search_service.web_search_model", return_value=model):
-        await WebSearchService.execute_web_search(
-            settings=settings,
-            endpoint_factory=lambda *_args: None,
-            query="q",
-            allowed_domains=["x.com"],
-            excluded_domains=["y.com"],
-        )
-    model.search.assert_awaited_once_with(
-        query="q",
-        engine="firecrawl",
-        max_results=1,
-        allowed_domains=None,
-        excluded_domains=None,
-    )
-
-    session = MagicMock()
-    settings_cache = SimpleNamespace(WEB_SEARCH_CACHE_TTL_HOURS=1, WEB_SEARCH_CACHE_SOURCE="cache-source")
-    out0 = await WebSearchService.cache_web_search_results(
-        session=session,
-        result={"sources": []},
-        settings=settings_cache,
-        upsert_source_fn=lambda *_a: 1,
-        crawled_page_cls=CrawledPage,
-        content_class_text="text",
-        embedding_dim=4,
-    )
-    assert out0 == 0
-
-
-def test_web_search_service_helpers_cover_branches():
-    assert _web_search_sources({"sources": 1}) == []
-
-    s = MagicMock()
-    assert _commit_web_search_cache_rows(s, []) == 0
-
-    row = SimpleNamespace(
-        is_active=False, expires_at=datetime.now(timezone.utc) - timedelta(seconds=1), page_metadata={"source": "src"}
-    )
-    assert _row_expires_before(row, datetime.now(timezone.utc)) is True
-    assert _row_cache_source(row) == "src"
-    assert _is_expired_web_cache_row(row, "src", datetime.now(timezone.utc)) is True
-
-    sess = MagicMock()
-    sess.exec.return_value.all.return_value = [row]
-    _prune_expired_web_search_cache(sess, CrawledPage, "src", datetime.now(timezone.utc))
-    assert sess.delete.called
-
-    sess2 = MagicMock()
-    _delete_web_search_cache_rows(sess2, [row])
-    assert sess2.commit.called
-
-    assert _as_web_search_source_item("x") is None
-    assert _normalized_web_search_cache_fields("x") is None
-
-    now = datetime.now(timezone.utc)
-    md = _web_search_cache_page_metadata({"query": "q"}, "src", "u", "t", "s", now, now)
-    assert md["source"] == "src"
-    rm = _web_search_cache_retrieval_metadata("src", "u", now)
-    assert rm["url"] == "u"
-    assert _web_search_cache_content({"answer": "a"}, "u", "", "") == "a"
-
-    row_obj = _build_single_web_search_cache_row(
-        result={"query": "q", "answer": "a"},
-        item={"url": "https://x", "title": "t", "snippet": "s"},
-        source_id=1,
-        source_name="src",
-        now=now,
-        expires_at=now,
-        index=0,
-        crawled_page_cls=lambda **kw: SimpleNamespace(**kw),
-        content_class_text="text",
-        embedding_dim=4,
-    )
-    assert row_obj.url == "https://x"
-
-    assert (
-        _build_single_web_search_cache_row(
-            result={"query": "q"},
-            item="bad-item",
-            source_id=1,
-            source_name="src",
-            now=now,
-            expires_at=now,
-            index=0,
-            crawled_page_cls=lambda **kw: SimpleNamespace(**kw),
-            content_class_text="text",
-            embedding_dim=4,
-        )
-        is None
-    )
-
-    assert (
-        _build_single_web_search_cache_row(
-            result={"query": "q"},
-            item={"url": "", "title": "t", "snippet": "s"},
-            source_id=1,
-            source_name="src",
-            now=now,
-            expires_at=now,
-            index=0,
-            crawled_page_cls=lambda **kw: SimpleNamespace(**kw),
-            content_class_text="text",
-            embedding_dim=4,
-        )
-        is None
-    )
-
-
-@pytest.mark.asyncio
-async def test_web_search_service_cache_full_path_and_row_building():
-    session = MagicMock()
-    session.exec.return_value.all.return_value = []
-    settings_cache = SimpleNamespace(WEB_SEARCH_CACHE_TTL_HOURS=1, WEB_SEARCH_CACHE_SOURCE="cache-source")
-
-    with patch("src.services.web_search_service._prune_expired_web_search_cache"):
-        out = await WebSearchService.cache_web_search_results(
-            session=session,
-            result={
-                "query": "q",
-                "answer": "a",
-                "sources": [
-                    "not-a-dict",
-                    {"url": "", "title": "bad", "snippet": "bad"},
-                    {"url": "https://ok", "title": "title", "snippet": "snippet"},
-                ],
-            },
-            settings=settings_cache,
-            upsert_source_fn=lambda *_a: 123,
-            crawled_page_cls=lambda **kw: SimpleNamespace(**kw),
-            content_class_text="text",
-            embedding_dim=4,
-        )
-    assert out == 1
-    assert session.add_all.called
-    assert session.commit.called
-
-
-@pytest.mark.asyncio
 async def test_contextual_and_embedding_services_and_utils_prompt():
     logger = MagicMock()
     endpoint = SimpleNamespace(
@@ -601,21 +329,16 @@ async def test_contextual_generate_returns_chunk_when_summary_empty():
     assert ok is False
 
 
-def test_config_web_search_effective_properties_and_retrieval_wrapper():
+def test_config_and_retrieval_wrapper():
     s = Settings(
         POSTGRES_URL="postgresql://u:p@h/db",
         EMBEDDING_BASE_URL="http://localhost:11434/v1",
         EMBEDDING_MODEL_NAME="m",
-        WEB_SEARCH_BASE_URL="https://openrouter.ai/api/v1/",
-        WEB_SEARCH_MODEL_NAME="  model  ",
-        WEB_SEARCH_MAX_RETRIES=0,
-        WEB_SEARCH_RETRY_DELAY_SECONDS=1.25,
     )
-    assert str(s.effective_web_search_provider).lower().endswith("openrouter")
-    assert s.effective_web_search_base_url == "https://openrouter.ai/api/v1"
-    assert s.effective_web_search_model_name == "model"
-    assert s.effective_web_search_max_retries == 1
-    assert s.effective_web_search_retry_delay_seconds == 1.25
+    assert s.effective_embedding_base_url == "http://localhost:11434/v1"
+    assert s.effective_embedding_model_name == "m"
+    assert s.effective_embedding_max_retries == 3
+    assert s.effective_embedding_retry_delay_seconds == 1.0
 
     with patch("src.services.retrieval._search_documents_with_embedding", return_value=[]) as m:
         out = search_documents_with_embedding(

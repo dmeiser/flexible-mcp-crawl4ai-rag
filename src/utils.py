@@ -24,7 +24,6 @@ from src.config import (  # noqa: F401
     ContentClass,
     MarkdownIndexPolicy,
     Settings,
-    WebSearchProvider,
     settings,
 )
 from src.exceptions import EmbeddingError  # noqa: F401

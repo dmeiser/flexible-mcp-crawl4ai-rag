@@ -19,10 +19,6 @@ class ChunkStrategy(str, Enum):
     SEMANTIC = "semantic"
 
 
-class WebSearchProvider(str, Enum):
-    OPENROUTER = "openrouter"
-
-
 class ContentClass(str, Enum):
     TEXT = "text"
     CODE = "code"
@@ -63,7 +59,6 @@ class Settings(BaseSettings):
     USE_HYBRID_SEARCH: bool = False
     USE_AGENTIC_RAG: bool = False
     USE_RERANKING: bool = False
-    USE_WEB_SEARCH: bool = False
 
     # Markdown indexing policy
     MARKDOWN_INDEX_POLICY: MarkdownIndexPolicy = MarkdownIndexPolicy.BOTH_BY_DEFAULT
@@ -101,21 +96,6 @@ class Settings(BaseSettings):
     RERANK_LLM_MODEL_NAME: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     RERANK_LLM_MAX_RETRIES: Optional[int] = None
     RERANK_LLM_RETRY_DELAY_SECONDS: Optional[float] = None
-
-    # 4. Web search (requires USE_WEB_SEARCH=true)
-    WEB_SEARCH_PROVIDER: WebSearchProvider = WebSearchProvider.OPENROUTER
-    WEB_SEARCH_BASE_URL: str = "https://openrouter.ai/api/v1"
-    WEB_SEARCH_API_KEY: Optional[str] = None
-    WEB_SEARCH_MODEL_NAME: Optional[str] = None
-    WEB_SEARCH_MAX_RETRIES: int = 3
-    WEB_SEARCH_RETRY_DELAY_SECONDS: float = 1.0
-    WEB_SEARCH_DEFAULT_ENGINE: str = "auto"
-    WEB_SEARCH_DEFAULT_MAX_RESULTS: int = 5
-
-    # Optional short-TTL cache for web lead ingestion.
-    WEB_SEARCH_CACHE_ENABLED: bool = False
-    WEB_SEARCH_CACHE_TTL_HOURS: int = 24
-    WEB_SEARCH_CACHE_SOURCE: str = "openrouter_web_search"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -197,26 +177,6 @@ class Settings(BaseSettings):
     @property
     def effective_rerank_retry_delay_seconds(self) -> float:
         return float(self.RERANK_LLM_RETRY_DELAY_SECONDS or self.DEFAULT_LLM_RETRY_DELAY_SECONDS)
-
-    @property
-    def effective_web_search_provider(self) -> WebSearchProvider:
-        return self.WEB_SEARCH_PROVIDER
-
-    @property
-    def effective_web_search_base_url(self) -> str:
-        return str(self.WEB_SEARCH_BASE_URL).rstrip("/")
-
-    @property
-    def effective_web_search_model_name(self) -> str:
-        return str(self.WEB_SEARCH_MODEL_NAME or "").strip()
-
-    @property
-    def effective_web_search_max_retries(self) -> int:
-        return max(1, int(self.WEB_SEARCH_MAX_RETRIES))
-
-    @property
-    def effective_web_search_retry_delay_seconds(self) -> float:
-        return float(self.WEB_SEARCH_RETRY_DELAY_SECONDS)
 
 
 settings = Settings()  # type: ignore[call-arg]
