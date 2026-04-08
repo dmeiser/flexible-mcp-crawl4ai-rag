@@ -19,8 +19,6 @@ class WebSearchService:
         settings: Any,
         endpoint_factory: Callable[[Optional[str], Optional[str]], Any],
         query: str,
-        engine: Optional[str] = None,
-        max_results: Optional[int] = None,
         allowed_domains: Optional[List[str]] = None,
         excluded_domains: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
@@ -30,8 +28,15 @@ class WebSearchService:
             max_retries=settings.effective_web_search_max_retries,
             retry_delay_seconds=settings.effective_web_search_retry_delay_seconds,
         )
-        resolved_engine = (engine.strip() if engine else None) or settings.WEB_SEARCH_DEFAULT_ENGINE
-        resolved_max_results = max(1, int(max_results or settings.WEB_SEARCH_DEFAULT_MAX_RESULTS))
+        resolved_engine = settings.WEB_SEARCH_DEFAULT_ENGINE
+        resolved_max_results = max(1, int(settings.WEB_SEARCH_DEFAULT_MAX_RESULTS))
+
+        # Firecrawl does not support domain filtering — strip silently
+        # to avoid a 400 from OpenRouter.
+        if resolved_engine == "firecrawl":
+            allowed_domains = None
+            excluded_domains = None
+
         model = web_search_model(
             provider=settings.effective_web_search_provider,
             configuration=configuration,

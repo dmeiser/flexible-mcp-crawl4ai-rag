@@ -73,8 +73,6 @@ logger = logging.getLogger(__name__)
 
 async def execute_web_search(
     query: str,
-    engine: Optional[str] = None,
-    max_results: Optional[int] = None,
     allowed_domains: Optional[List[str]] = None,
     excluded_domains: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
@@ -82,8 +80,6 @@ async def execute_web_search(
         settings=settings,
         endpoint_factory=_openai_compatible_endpoint,
         query=query,
-        engine=engine,
-        max_results=max_results,
         allowed_domains=allowed_domains,
         excluded_domains=excluded_domains,
     )
@@ -5917,18 +5913,27 @@ async def search_fit_markdown(
 async def search_web(
     ctx: Context,
     query: str,
-    engine: Optional[str] = None,
-    max_results: Optional[int] = None,
     allowed_domains: Optional[List[str]] = None,
     excluded_domains: Optional[List[str]] = None,
 ) -> str:
     """Search the live web via OpenRouter web search.
 
-    ``engine`` and ``max_results`` fall back to the server-wide
-    ``WEB_SEARCH_DEFAULT_ENGINE`` / ``WEB_SEARCH_DEFAULT_MAX_RESULTS``
-    settings when not supplied by the caller.
+    The search engine and maximum result count are controlled by the
+    server-wide ``WEB_SEARCH_DEFAULT_ENGINE`` and
+    ``WEB_SEARCH_DEFAULT_MAX_RESULTS`` settings.
 
-    Only available when USE_WEB_SEARCH=true and valid WEB_SEARCH_* settings are configured.
+    Domain filtering support depends on the configured engine:
+
+    - **exa** / **parallel**: ``allowed_domains`` and ``excluded_domains``
+      are both supported.
+    - **firecrawl**: domain filtering is **not** supported (a 400 error
+      is returned by OpenRouter).  Any domain filters passed here are
+      silently dropped.
+    - **auto** / **native**: domain filter support varies by upstream
+      provider.
+
+    Only available when USE_WEB_SEARCH=true and valid WEB_SEARCH_*
+    settings are configured.
     """
     _ = ctx
     config_error = _web_search_config_error(query)
@@ -5936,7 +5941,7 @@ async def search_web(
         return config_error
 
     try:
-        result = await execute_web_search(query, engine, max_results, allowed_domains, excluded_domains)
+        result = await execute_web_search(query, allowed_domains, excluded_domains)
         cached = await _maybe_cache_web_search_result(result)
         return _search_web_success_payload(query, result, cached)
     except Exception as exc:

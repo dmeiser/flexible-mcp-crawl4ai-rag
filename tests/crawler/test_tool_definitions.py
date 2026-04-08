@@ -166,7 +166,7 @@ class TestSearchWeb:
         assert data["success"] is True
         assert data["answer"] == "Hello"
         assert data["cached"] is False
-        mock_exec.assert_awaited_once_with("query", None, None, None, None)
+        mock_exec.assert_awaited_once_with("query", None, None)
 
     @pytest.mark.asyncio
     async def test_successful_search_with_cache(self):
@@ -251,6 +251,28 @@ class TestSearchWeb:
         data = json.loads(result)
         assert data["success"] is False
         assert "Unsupported WEB_SEARCH_PROVIDER" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_domains_passed_through_for_exa(self):
+        ctx = _make_ctx()
+        normalized = {
+            "answer": "Hello",
+            "sources": [],
+            "search_params": {"engine": "exa", "max_results": 5},
+            "usage": {},
+            "model": "openrouter/test-model",
+        }
+        with (
+            patch.object(td.settings, "WEB_SEARCH_PROVIDER", "openrouter"),
+            patch.object(td.settings, "WEB_SEARCH_API_KEY", "secret"),
+            patch.object(td.settings, "WEB_SEARCH_MODEL_NAME", "model"),
+            patch.object(td.settings, "WEB_SEARCH_CACHE_ENABLED", False),
+            patch("src.tools.tool_definitions.execute_web_search", new=AsyncMock(return_value=normalized)) as mock_exec,
+        ):
+            result = await td.search_web(ctx, "query", allowed_domains=["example.com"], excluded_domains=["bad.com"])
+        data = json.loads(result)
+        assert data["success"] is True
+        mock_exec.assert_awaited_once_with("query", ["example.com"], ["bad.com"])
 
 
 class TestSearchDocumentsV2:
