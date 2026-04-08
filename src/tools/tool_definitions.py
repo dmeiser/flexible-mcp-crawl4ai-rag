@@ -73,8 +73,8 @@ logger = logging.getLogger(__name__)
 
 async def execute_web_search(
     query: str,
-    engine: str = "auto",
-    max_results: int = 5,
+    engine: Optional[str] = None,
+    max_results: Optional[int] = None,
     allowed_domains: Optional[List[str]] = None,
     excluded_domains: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
@@ -5917,12 +5917,16 @@ async def search_fit_markdown(
 async def search_web(
     ctx: Context,
     query: str,
-    engine: str = "auto",
-    max_results: int = 5,
+    engine: Optional[str] = None,
+    max_results: Optional[int] = None,
     allowed_domains: Optional[List[str]] = None,
     excluded_domains: Optional[List[str]] = None,
 ) -> str:
     """Search the live web via OpenRouter web search.
+
+    ``engine`` and ``max_results`` fall back to the server-wide
+    ``WEB_SEARCH_DEFAULT_ENGINE`` / ``WEB_SEARCH_DEFAULT_MAX_RESULTS``
+    settings when not supplied by the caller.
 
     Only available when USE_WEB_SEARCH=true and valid WEB_SEARCH_* settings are configured.
     """

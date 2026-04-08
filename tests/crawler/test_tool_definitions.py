@@ -166,7 +166,7 @@ class TestSearchWeb:
         assert data["success"] is True
         assert data["answer"] == "Hello"
         assert data["cached"] is False
-        mock_exec.assert_awaited_once_with("query", "auto", 5, None, None)
+        mock_exec.assert_awaited_once_with("query", None, None, None, None)
 
     @pytest.mark.asyncio
     async def test_successful_search_with_cache(self):

@@ -19,8 +19,8 @@ class WebSearchService:
         settings: Any,
         endpoint_factory: Callable[[Optional[str], Optional[str]], Any],
         query: str,
-        engine: str = "auto",
-        max_results: int = 5,
+        engine: Optional[str] = None,
+        max_results: Optional[int] = None,
         allowed_domains: Optional[List[str]] = None,
         excluded_domains: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
@@ -30,16 +30,16 @@ class WebSearchService:
             max_retries=settings.effective_web_search_max_retries,
             retry_delay_seconds=settings.effective_web_search_retry_delay_seconds,
         )
+        resolved_engine = (engine.strip() if engine else None) or settings.WEB_SEARCH_DEFAULT_ENGINE
+        resolved_max_results = max(1, int(max_results or settings.WEB_SEARCH_DEFAULT_MAX_RESULTS))
         model = web_search_model(
             provider=settings.effective_web_search_provider,
             configuration=configuration,
             model_name=settings.effective_web_search_model_name,
             endpoint_factory=endpoint_factory,
-            default_engine=settings.WEB_SEARCH_DEFAULT_ENGINE,
-            default_max_results=settings.WEB_SEARCH_DEFAULT_MAX_RESULTS,
+            default_engine=resolved_engine,
+            default_max_results=resolved_max_results,
         )
-        resolved_engine = (engine or settings.WEB_SEARCH_DEFAULT_ENGINE).strip() or settings.WEB_SEARCH_DEFAULT_ENGINE
-        resolved_max_results = max(1, int(max_results or settings.WEB_SEARCH_DEFAULT_MAX_RESULTS))
         return await model.search(
             query=query,
             engine=resolved_engine,
