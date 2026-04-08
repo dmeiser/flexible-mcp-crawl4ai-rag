@@ -348,29 +348,13 @@ RERANK_LLM_MODEL_NAME=cross-encoder/ms-marco-MiniLM-L-6-v2
 
 ### Web search
 
-`search_web` is a separate MCP tool with a pluggable provider model. Today the supported provider is `openrouter`; the settings surface is structured so future providers such as Brave or DuckDuckGo can be added behind the same tool contract.
+`search_web` is a separate MCP tool backed by [OpenRouter's `openrouter:web_search` server tool](https://openrouter.ai/docs/guides/features/server-tools/web-search). The settings surface is structured so future providers can be added behind the same tool contract.
 
-Current provider selection:
+**How it works:** a chat completion request is sent to the LLM specified by `WEB_SEARCH_MODEL_NAME` on OpenRouter, with `openrouter:web_search` attached as a server tool. The LLM decides whether a web search is needed, OpenRouter executes the search, and the LLM synthesises an answer grounded in the results. The model may search multiple times in a single request.
 
-```env
-WEB_SEARCH_PROVIDER=openrouter
-```
+`WEB_SEARCH_MODEL_NAME` is any chat model hosted on OpenRouter (e.g. `openai/gpt-4o-mini`, `anthropic/claude-sonnet-4`, `google/gemini-2.0-flash-001`). This is the LLM that processes and answers the query — it is **not** a search-engine identifier.
 
-With `WEB_SEARCH_PROVIDER=openrouter`, the tool performs live web queries through OpenRouter's current server-tool interface:
-
-```json
-{
-   "tools": [
-      {
-         "type": "openrouter:web_search",
-         "parameters": {
-            "engine": "auto",
-            "max_results": 5
-         }
-      }
-   ]
-}
-```
+The `engine` and `max_results` parameters can be overridden per `search_web` invocation by the caller; the `WEB_SEARCH_DEFAULT_*` settings provide fallback defaults. Available engines: `auto` (default — uses provider-native search when available, falls back to Exa), `native`, `exa`, `firecrawl`, `parallel`.
 
 Example configuration:
 
@@ -378,10 +362,8 @@ Example configuration:
 USE_WEB_SEARCH=true
 WEB_SEARCH_PROVIDER=openrouter
 WEB_SEARCH_BASE_URL=https://openrouter.ai/api/v1
-WEB_SEARCH_API_KEY=<key>
-WEB_SEARCH_MODEL_NAME=openrouter/perplexity/sonar
-WEB_SEARCH_DEFAULT_ENGINE=auto
-WEB_SEARCH_DEFAULT_MAX_RESULTS=5
+WEB_SEARCH_API_KEY=<your-openrouter-key>
+WEB_SEARCH_MODEL_NAME=openai/gpt-4o-mini
 ```
 
 Optional ephemeral cache:

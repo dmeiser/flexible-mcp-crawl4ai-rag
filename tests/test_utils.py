@@ -301,7 +301,6 @@ class TestSettingsValidation:
         s = Settings(
             POSTGRES_URL="postgresql://u:p@h/db",
             EMBEDDING_API_KEY="sk-test",
-            EMBEDDING_MODEL_NAME=None,
         )
         assert s.effective_embedding_model_name == "nomic-embed-text"
 

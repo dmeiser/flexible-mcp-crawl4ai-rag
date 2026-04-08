@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     # OpenAI-compatible embedding settings
     EMBEDDING_BASE_URL: Optional[str] = None
     EMBEDDING_API_KEY: Optional[str] = None
-    EMBEDDING_MODEL_NAME: Optional[str] = None
+    EMBEDDING_MODEL_NAME: str = "nomic-embed-text"
     EMBEDDING_MAX_RETRIES: int = 3
     EMBEDDING_RETRY_DELAY_SECONDS: float = 1.0
 
@@ -128,9 +128,7 @@ class Settings(BaseSettings):
 
     @property
     def effective_embedding_model_name(self) -> str:
-        if self.EMBEDDING_MODEL_NAME:
-            return self.EMBEDDING_MODEL_NAME
-        return "nomic-embed-text"
+        return self.EMBEDDING_MODEL_NAME
 
     @property
     def effective_embedding_max_retries(self) -> int:
