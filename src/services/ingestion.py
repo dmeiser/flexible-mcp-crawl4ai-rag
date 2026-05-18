@@ -225,16 +225,29 @@ async def _index_knowledge_graphs(
     session: Session,
     urls: List[str],
     contents: List[str],
-    endpoint_factory: Optional[Callable[..., Any]],
+    endpoint_factory: Optional[Callable[..., Any]] = None,
 ) -> None:
     from src.config import settings
     from src.services.graph_storage_service import store_knowledge_graph
     from src.services.kg_extraction_service import KnowledgeGraphExtractionService
     from src.utils import create_embedding
 
-    if not (settings.USE_GRAPH_INDEX and settings.effective_kg_model_name and endpoint_factory is not None):
+    if not (settings.USE_GRAPH_INDEX and settings.effective_kg_model_name):
         return
-    extractor = KnowledgeGraphExtractionService(endpoint_factory=endpoint_factory, logger=logger)
+
+    def _default_factory(**kwargs: Any) -> Any:
+        from openai import AsyncOpenAI
+
+        from src.services.kg_extraction_service import OpenAIEndpointAdapter
+
+        client = AsyncOpenAI(
+            api_key=settings.effective_kg_api_key,
+            base_url=settings.effective_kg_base_url,
+        )
+        return OpenAIEndpointAdapter(client)
+
+    factory = endpoint_factory if endpoint_factory is not None else _default_factory
+    extractor = KnowledgeGraphExtractionService(endpoint_factory=factory, logger=logger)
     for url, content in zip(urls, contents):
         kg_data = await extractor.extract_knowledge_graph(settings, content, url)
         await store_knowledge_graph(session, kg_data, url, None, create_embedding)

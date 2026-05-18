@@ -1,5 +1,31 @@
+import asyncio
 import json
 from typing import Any, Callable, Dict
+
+
+class OpenAIEndpointAdapter:
+    """Thin adapter so AsyncOpenAI satisfies the chat_completion(request_kwargs, ...) interface
+    expected by KnowledgeGraphExtractionService (and mockable in tests)."""
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    async def chat_completion(
+        self,
+        request_kwargs: Dict[str, Any],
+        max_retries: int = 3,
+        retry_delay_seconds: float = 1.0,
+        call_name: str = "",
+    ) -> Any:
+        last_exc: Exception | None = None
+        for attempt in range(max_retries):
+            try:
+                return await self._client.chat.completions.create(**request_kwargs)
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay_seconds)
+        raise last_exc  # type: ignore[misc]
 
 
 class KnowledgeGraphExtractionService:
