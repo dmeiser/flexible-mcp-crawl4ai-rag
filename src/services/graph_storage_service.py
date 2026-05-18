@@ -17,6 +17,8 @@ async def store_knowledge_graph(
 
     node_ids: Dict[str, int] = {}
     for entity in entities:
+        if not isinstance(entity, dict):
+            continue
         name = entity.get("name", "").strip()
         if not name:
             continue
@@ -28,6 +30,8 @@ async def store_knowledge_graph(
         node_ids[name] = node_id
 
     for rel in relationships:
+        if not isinstance(rel, dict):
+            continue
         src_name = rel.get("source", "").strip()
         tgt_name = rel.get("target", "").strip()
         relationship = rel.get("relationship", "").strip()
