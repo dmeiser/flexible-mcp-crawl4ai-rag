@@ -70,7 +70,15 @@ class KnowledgeGraphExtractionService:
             content = resp.choices[0].message.content
             if not isinstance(content, str):
                 return empty
-            payload = json.loads(content.strip())
+            # Strip markdown code fences and extract the outermost JSON object
+            stripped = content.strip().strip("`").strip()
+            if stripped.startswith("json"):
+                stripped = stripped[4:].strip()
+            start = stripped.find("{")
+            end = stripped.rfind("}") + 1
+            if start == -1 or end == 0:
+                return empty
+            payload = json.loads(stripped[start:end])
             if not isinstance(payload, dict):
                 return empty
             if not isinstance(payload.get("entities"), list) or not isinstance(payload.get("relationships"), list):
