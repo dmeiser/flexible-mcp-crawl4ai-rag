@@ -244,6 +244,23 @@ def _delete_existing_crawled_pages(
     return first_seen_map
 
 
+async def _contextual_embed_texts(
+    contents: Sequence[str],
+    full_docs: Sequence[Optional[str]],
+) -> List[str]:
+    """Generate contextually enriched embed texts by calling the LLM for each chunk."""
+    enriched = await asyncio.gather(
+        *[_utils.generate_contextual_text(fd or "", c) for c, fd in zip(contents, full_docs)]
+    )
+    return [entry[0] for entry in enriched]
+
+
+def _filter_valid_embed_texts(embed_texts: List[str], contents: Sequence[str]) -> List[str]:
+    """Filter *embed_texts* to only those whose corresponding content is non-empty."""
+    valid_mask = [bool(c and c.strip()) for c in contents]
+    return [embed_texts[i] for i, ok in enumerate(valid_mask) if ok]
+
+
 async def add_documents_to_db(
     session: Session,
     urls: List[str],
@@ -264,10 +281,7 @@ async def add_documents_to_db(
 
     v_urls, v_contents, v_metas, v_chunks, v_fulldocs = valid
 
-    v_embed_texts: Optional[List[str]] = None
-    if embed_texts is not None:
-        valid_mask = [bool(c and c.strip()) for c in contents]
-        v_embed_texts = [embed_texts[i] for i, ok in enumerate(valid_mask) if ok]
+    v_embed_texts = _filter_valid_embed_texts(embed_texts, contents) if embed_texts is not None else None
 
     first_seen_map = _delete_existing_crawled_pages(session, list(v_urls))
 
@@ -312,10 +326,7 @@ async def _embedding_texts_for_documents(
         return embed_overrides
     if not _should_enrich_with_context(full_documents):
         return list(contents)
-    enriched = await asyncio.gather(
-        *[_utils.generate_contextual_text(fd or "", c) for c, fd in zip(contents, full_docs)]
-    )
-    return [entry[0] for entry in enriched]
+    return await _contextual_embed_texts(contents, full_docs)
 
 
 def _should_enrich_with_context(full_documents: Optional[List[str]]) -> bool:

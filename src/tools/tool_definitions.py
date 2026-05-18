@@ -61,7 +61,6 @@ from src.services.search_service import search_knowledge_graph as _search_knowle
 from src.services.tombstone_service import get_db_size_bytes, tombstone_records
 from src.services.url_scorers import build_url_scorer, get_supported_scorer_types
 from src.services.web_crawler import (
-    chunk_text_according_to_settings,
     chunk_text_with_heading_metadata,
     crawl_recursive_internal_links,
 )
@@ -2226,14 +2225,27 @@ async def _collect_index_payload_for_doc(
         db_fulldocs.extend(variant_payload[4])
         db_embed_texts.extend(variant_payload[5])
 
-    return db_urls, db_chunks, db_contents, db_metas, db_fulldocs, indexed_variant_keys, doc_fallback_notes, db_embed_texts
+    return (
+        db_urls,
+        db_chunks,
+        db_contents,
+        db_metas,
+        db_fulldocs,
+        indexed_variant_keys,
+        doc_fallback_notes,
+        db_embed_texts,
+    )
 
 
 def _extend_index_payload(
     payload: Dict[str, Any],
-    doc_payload: tuple[List[str], List[int], List[str], List[Dict[str, Any]], List[str], set[str], List[str], List[str]],
+    doc_payload: tuple[
+        List[str], List[int], List[str], List[Dict[str, Any]], List[str], set[str], List[str], List[str]
+    ],
 ) -> None:
-    db_urls, db_chunks, db_contents, db_metas, db_fulldocs, indexed_variants, fallback_notes, db_embed_texts = doc_payload
+    db_urls, db_chunks, db_contents, db_metas, db_fulldocs, indexed_variants, fallback_notes, db_embed_texts = (
+        doc_payload
+    )
     payload["db_urls"].extend(db_urls)
     payload["db_chunks"].extend(db_chunks)
     payload["db_contents"].extend(db_contents)

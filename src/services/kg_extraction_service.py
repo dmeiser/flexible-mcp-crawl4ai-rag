@@ -1,6 +1,37 @@
 import asyncio
 import json
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional, Tuple
+
+
+def _json_object_bounds(text: str) -> Optional[Tuple[int, int]]:
+    """Return (start, end) slice indices of the outermost ``{...}`` in *text*, or ``None``."""
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start == -1 or end == 0:
+        return None
+    return start, end
+
+
+def _validate_kg_payload(payload: Any) -> bool:
+    return isinstance(payload.get("entities"), list) and isinstance(payload.get("relationships"), list)
+
+
+def _parse_kg_json_content(content: str) -> Optional[Dict[str, Any]]:
+    """Strip markdown fences and parse the outermost JSON object from *content*.
+
+    Returns a dict with ``entities`` and ``relationships`` lists, or ``None``
+    if parsing fails or the structure is invalid.
+    """
+    stripped = content.strip().strip("`").strip()
+    if stripped.startswith("json"):
+        stripped = stripped[4:].strip()
+    bounds = _json_object_bounds(stripped)
+    if bounds is None:
+        return None
+    payload = json.loads(stripped[bounds[0] : bounds[1]])
+    if not _validate_kg_payload(payload):
+        return None
+    return {"entities": payload["entities"], "relationships": payload["relationships"]}
 
 
 class OpenAIEndpointAdapter:
@@ -48,10 +79,8 @@ class KnowledgeGraphExtractionService:
             f"Document:\n{text[:20000]}"
         )
 
-    async def extract_knowledge_graph(self, settings: Any, text: str, source_url: str) -> Dict[str, Any]:
-        empty: Dict[str, Any] = {"entities": [], "relationships": []}
-        if not settings.effective_kg_model_name:
-            return empty
+    async def _call_kg_endpoint(self, settings: Any, text: str, source_url: str) -> Optional[str]:
+        """Call the LLM and return the raw content string, or ``None`` on any error."""
         try:
             endpoint = self._endpoint_factory(
                 api_key=settings.effective_kg_api_key,
@@ -69,23 +98,18 @@ class KnowledgeGraphExtractionService:
                 call_name="kg extraction LLM",
             )
             content = resp.choices[0].message.content
-            if not isinstance(content, str):
-                return empty
-            # Strip markdown code fences and extract the outermost JSON object
-            stripped = content.strip().strip("`").strip()
-            if stripped.startswith("json"):
-                stripped = stripped[4:].strip()
-            start = stripped.find("{")
-            end = stripped.rfind("}") + 1
-            if start == -1 or end == 0:
-                return empty
-            payload = json.loads(stripped[start:end])
-            if not isinstance(payload, dict):
-                return empty
-            if not isinstance(payload.get("entities"), list) or not isinstance(payload.get("relationships"), list):
-                return empty
-            return {"entities": payload["entities"], "relationships": payload["relationships"]}
+            return content if isinstance(content, str) else None
         except Exception as exc:
             if self._logger:
                 self._logger.error("KG extraction LLM call failed for %s: %s", source_url, exc, exc_info=True)
+            return None
+
+    async def extract_knowledge_graph(self, settings: Any, text: str, source_url: str) -> Dict[str, Any]:
+        empty: Dict[str, Any] = {"entities": [], "relationships": []}
+        if not settings.effective_kg_model_name:
             return empty
+        content = await self._call_kg_endpoint(settings, text, source_url)
+        if content is None:
+            return empty
+        parsed = _parse_kg_json_content(content)
+        return parsed if parsed is not None else empty

@@ -8,6 +8,15 @@ from sqlalchemy import text
 from sqlmodel import Session, select
 
 
+def _prepare_search_filters(
+    filter_metadata: Optional[Dict[str, Any]],
+    heading_path_prefix_filter: Optional[List[str]],
+) -> tuple[str, Optional[str]]:
+    filter_json = json.dumps(filter_metadata or {})
+    hp_filter = json.dumps(heading_path_prefix_filter) if heading_path_prefix_filter is not None else None
+    return filter_json, hp_filter
+
+
 async def search_documents(
     *,
     settings: Any,
@@ -29,8 +38,7 @@ async def search_documents(
     if query_embedding is None:
         return []
 
-    filter_json = json.dumps(filter_metadata or {})
-    hp_filter = json.dumps(heading_path_prefix_filter) if heading_path_prefix_filter is not None else None
+    filter_json, hp_filter = _prepare_search_filters(filter_metadata, heading_path_prefix_filter)
     return _search_documents_with_embedding(
         session=session,
         query=query,

@@ -3,7 +3,7 @@
 import hashlib
 import logging
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from sqlmodel import Session
@@ -116,6 +116,21 @@ def _doc_chunk_metadata(
     return metadata
 
 
+def _variant_doc_fields(doc: Dict[str, Any]) -> Tuple[Dict[str, Any], str, Any]:
+    """Extract variant metadata fields from *doc*, handling ``or`` defaults inline."""
+    variant_values = _extract_variant_values(doc)
+    references_markdown = variant_values.get("references_markdown") or ""
+    selected_variant = doc.get("selected_variant") or doc.get("markdown_variant")
+    return variant_values, references_markdown, selected_variant
+
+
+def _embed_text_for_chunk(chunk: str, heading_path: List[str]) -> str:
+    """Prepend the heading breadcrumb to *chunk* when a heading path is present."""
+    if heading_path:
+        return f"[{' > '.join(heading_path)}]\n\n{chunk}"
+    return chunk
+
+
 async def _collect_doc_chunks(
     crawl_type: str,
     doc: Dict[str, Any],
@@ -132,9 +147,7 @@ async def _collect_doc_chunks(
         logger.warning(f"No markdown for {source_url}, skipping.")
         return
 
-    variant_values = _extract_variant_values(doc)
-    references_markdown = variant_values.get("references_markdown") or ""
-    selected_variant = doc.get("selected_variant") or doc.get("markdown_variant")
+    variant_values, references_markdown, selected_variant = _variant_doc_fields(doc)
     link_references = extract_link_references(references_markdown)
     extra_metadata = _extract_extra_metadata(doc)
     chunk_pairs = await chunk_text_with_heading_metadata(markdown)
@@ -155,10 +168,7 @@ async def _collect_doc_chunks(
             heading_path=heading_path,
             heading_level=heading_level,
         )
-        if heading_path:
-            embed_text = f"[{' > '.join(heading_path)}]\n\n{chunk}"
-        else:
-            embed_text = chunk
+        embed_text = _embed_text_for_chunk(chunk, heading_path)
         _append_chunk_records(
             urls,
             contents,
@@ -232,7 +242,12 @@ async def index_knowledge_graphs(
     from src.services.kg_extraction_service import KnowledgeGraphExtractionService
     from src.utils import create_embedding
 
-    logger.debug("index_knowledge_graphs called: USE_GRAPH_INDEX=%s model=%s urls=%d", settings.USE_GRAPH_INDEX, settings.effective_kg_model_name, len(urls))
+    logger.debug(
+        "index_knowledge_graphs called: USE_GRAPH_INDEX=%s model=%s urls=%d",
+        settings.USE_GRAPH_INDEX,
+        settings.effective_kg_model_name,
+        len(urls),
+    )
 
     if not (settings.USE_GRAPH_INDEX and settings.effective_kg_model_name):
         return
@@ -253,5 +268,10 @@ async def index_knowledge_graphs(
     for url, content in zip(urls, contents):
         logger.info("Extracting KG for %s (content len=%d)", url, len(content))
         kg_data = await extractor.extract_knowledge_graph(settings, content, url)
-        logger.info("KG extracted for %s: %d entities, %d relationships", url, len(kg_data.get("entities", [])), len(kg_data.get("relationships", [])))
+        logger.info(
+            "KG extracted for %s: %d entities, %d relationships",
+            url,
+            len(kg_data.get("entities", [])),
+            len(kg_data.get("relationships", [])),
+        )
         await store_knowledge_graph(session, kg_data, url, None, create_embedding)

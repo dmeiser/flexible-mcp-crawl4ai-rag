@@ -2191,7 +2191,10 @@ class TestPhase1TaxonomyWrappers:
             patch(
                 "src.tools.tool_definitions.chunk_text_with_heading_metadata",
                 new_callable=AsyncMock,
-                return_value=[("c1", {"heading_path": [], "heading_level": 0}), ("c2", {"heading_path": [], "heading_level": 0})],
+                return_value=[
+                    ("c1", {"heading_path": [], "heading_level": 0}),
+                    ("c2", {"heading_path": [], "heading_level": 0}),
+                ],
             ),
             patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
             patch("src.tools.tool_definitions.add_documents_to_db", new_callable=AsyncMock, side_effect=_capture_add),

@@ -74,9 +74,7 @@ class TestStoreKnowledgeGraph:
                 {"name": "FastMCP", "type": "TOOL", "description": "A framework."},
                 {"name": "MCP", "type": "CONCEPT", "description": "A protocol."},
             ],
-            "relationships": [
-                {"source": "FastMCP", "relationship": "implements", "target": "MCP"}
-            ],
+            "relationships": [{"source": "FastMCP", "relationship": "implements", "target": "MCP"}],
         }
         await store_knowledge_graph(
             session=session,
@@ -92,9 +90,7 @@ class TestStoreKnowledgeGraph:
         session = _make_session(node_id=1)
         kg_data = {
             "entities": [{"name": "FastMCP", "type": "TOOL", "description": "A framework."}],
-            "relationships": [
-                {"source": "FastMCP", "relationship": "uses", "target": "UnknownEntity"}
-            ],
+            "relationships": [{"source": "FastMCP", "relationship": "uses", "target": "UnknownEntity"}],
         }
         await store_knowledge_graph(
             session=session,
@@ -166,3 +162,34 @@ class TestStoreKnowledgeGraph:
             create_embedding_fn=_fake_embed,
         )
         session.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_store_skips_non_dict_entities(self):
+        """Non-dict items in entities list are skipped (line 21 coverage)."""
+        session = _make_session()
+        await store_knowledge_graph(
+            session=session,
+            kg_data={"entities": ["not a dict", 42, None], "relationships": []},
+            source_url="https://x.com",
+            chunk_id=None,
+            create_embedding_fn=_fake_embed,
+        )
+        session.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_store_skips_non_dict_relationships(self):
+        """Non-dict items in relationships list are skipped (line 34 coverage)."""
+        session = _make_session(node_id=1)
+        kg_data = {
+            "entities": [{"name": "A", "type": "CONCEPT", "description": "desc"}],
+            "relationships": ["not a dict", 99],
+        }
+        await store_knowledge_graph(
+            session=session,
+            kg_data=kg_data,
+            source_url="https://x.com",
+            chunk_id=None,
+            create_embedding_fn=_fake_embed,
+        )
+        # node upsert fires but no edge upsert
+        assert session.execute.call_count == 1

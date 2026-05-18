@@ -385,3 +385,29 @@ class TestIndexKnowledgeGraphs:
 
         mock_extractor.extract_knowledge_graph.assert_called_once()
         mock_store.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_default_factory_creates_adapter_when_no_endpoint_factory(self):
+        """_default_factory (ingestion.py line 254) runs when endpoint_factory=None."""
+        from src.services.ingestion import index_knowledge_graphs
+
+        session = MagicMock()
+        mock_settings = MagicMock()
+        mock_settings.USE_GRAPH_INDEX = True
+        mock_settings.effective_kg_model_name = "some-model"
+        mock_settings.effective_kg_api_key = "key"
+        mock_settings.effective_kg_base_url = "http://llm"
+
+        mock_client = MagicMock()
+        mock_adapter = MagicMock()
+        mock_adapter.chat_completion = AsyncMock(side_effect=RuntimeError("no network in tests"))
+
+        with (
+            patch("src.config.settings", mock_settings),
+            patch("openai.AsyncOpenAI", return_value=mock_client),
+            patch("src.services.kg_extraction_service.OpenAIEndpointAdapter", return_value=mock_adapter),
+            patch("src.services.graph_storage_service.store_knowledge_graph", new_callable=AsyncMock),
+            patch("src.utils.create_embedding", new_callable=AsyncMock, return_value=[0.1]),
+        ):
+            # endpoint_factory=None → _default_factory is used → line 254 is reached
+            await index_knowledge_graphs(session, ["https://x.com"], ["content"], None)

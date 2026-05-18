@@ -245,6 +245,24 @@ def _build_heading_path(stack: list[dict]) -> list[str]:
     return [s["heading"] for s in stack]
 
 
+def _process_section(section: dict, stack: list[dict], size: int, overlap: int) -> list[tuple[str, list[str]]]:
+    """Update *stack* with *section* and return (chunk, path) pairs for its content."""
+    level = section["level"]
+    while stack and stack[-1]["level"] >= level:
+        stack.pop()
+    stack.append(section)
+    content = section["content"]
+    if not content:
+        return []
+    path = _build_heading_path(stack)
+    return [(chunk, list(path)) for chunk in _paragraph_chunking(content, size, overlap)]
+
+
+def _fallback_chunks(text: str, size: int, overlap: int) -> list[tuple[str, list[str]]]:
+    """Return paragraph chunks with empty heading paths (fallback for heading-free text)."""
+    return [(c, []) for c in _paragraph_chunking(text, size, overlap)]
+
+
 def heading_chunk_text(text: str, size: int, overlap: int) -> list[tuple[str, list[str]]]:
     """Chunk text respecting markdown section boundaries.
 
@@ -253,33 +271,14 @@ def heading_chunk_text(text: str, size: int, overlap: int) -> list[tuple[str, li
     Falls back to paragraph chunking with empty paths if no headings.
     """
     sections = _parse_markdown_sections(text)
-
     if len(sections) == 1 and sections[0]["level"] == 0:
-        chunks = _paragraph_chunking(text, size, overlap)
-        return [(c, []) for c in chunks]
-
-    results: list[tuple[str, list[str]]] = []
+        return _fallback_chunks(text, size, overlap)
     stack: list[dict] = []
-
+    results: list[tuple[str, list[str]]] = []
     for section in sections:
-        level = section["level"]
-        while stack and stack[-1]["level"] >= level:
-            stack.pop()
-        stack.append(section)
-
-        path = _build_heading_path(stack)
-        content = section["content"]
-        if not content:
-            continue
-
-        sub_chunks = _paragraph_chunking(content, size, overlap)
-        for chunk in sub_chunks:
-            results.append((chunk, list(path)))
-
+        results.extend(_process_section(section, stack, size, overlap))
     if not results:
-        chunks = _paragraph_chunking(text, size, overlap)
-        return [(c, []) for c in chunks]
-
+        return _fallback_chunks(text, size, overlap)
     return results
 
 
@@ -300,16 +299,13 @@ async def chunk_text_with_heading_metadata(
 
         effective_strategy = _utils.settings.CHUNK_STRATEGY
 
-    if effective_strategy == ChunkStrategy.HEADING or effective_strategy == ChunkStrategy.HEADING.value:
+    if effective_strategy in (ChunkStrategy.HEADING, ChunkStrategy.HEADING.value):
         import src.utils as _utils
 
         size = _utils.settings.CHUNK_SIZE
         overlap = _utils.settings.CHUNK_OVERLAP
         pairs = heading_chunk_text(text, size, overlap)
-        return [
-            (chunk, {"heading_path": path, "heading_level": len(path)})
-            for chunk, path in pairs
-        ]
+        return [(chunk, {"heading_path": path, "heading_level": len(path)}) for chunk, path in pairs]
     else:
         chunks = await chunk_text_according_to_settings(text)
         return [(c, {"heading_path": [], "heading_level": 0}) for c in chunks]

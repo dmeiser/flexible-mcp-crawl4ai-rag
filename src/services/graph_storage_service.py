@@ -1,6 +1,70 @@
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from sqlalchemy import text
+
+
+def _entity_fields(entity: Dict[str, Any]) -> Tuple[str, str, str]:
+    """Extract (name, etype, desc) from an entity dict."""
+    name = entity.get("name", "").strip()
+    etype = entity.get("type") or ""
+    desc = entity.get("description") or ""
+    return name, etype, desc
+
+
+def _valid_relationship(rel: Any, node_ids: Dict[str, int]) -> Optional[Tuple[int, int, str]]:
+    """Return (src_id, tgt_id, relationship) if *rel* is a complete, resolvable edge; else None."""
+    if not isinstance(rel, dict):
+        return None
+    src_name = rel.get("source", "").strip()
+    tgt_name = rel.get("target", "").strip()
+    relationship = rel.get("relationship", "").strip()
+    if not all([src_name, tgt_name, relationship]):
+        return None
+    src_id = node_ids.get(src_name)
+    tgt_id = node_ids.get(tgt_name)
+    if src_id is None or tgt_id is None:
+        return None
+    return src_id, tgt_id, relationship
+
+
+def _kg_lists(kg_data: Dict[str, Any]) -> Tuple[List[Any], List[Any]]:
+    return kg_data.get("entities") or [], kg_data.get("relationships") or []
+
+
+async def _store_entities(
+    session: Any,
+    entities: List[Any],
+    source_url: str,
+    chunk_id: Optional[int],
+    create_embedding_fn: Callable[[str], Any],
+) -> Dict[str, int]:
+    node_ids: Dict[str, int] = {}
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        name, etype, desc = _entity_fields(entity)
+        if not name:
+            continue
+        embed_text = f"{name}: {etype}. {desc}".strip()
+        embedding = await create_embedding_fn(embed_text)
+        node_id = await _upsert_graph_node(session, entity, source_url, chunk_id, embedding)
+        node_ids[name] = node_id
+    return node_ids
+
+
+async def _store_relationships(
+    session: Any,
+    relationships: List[Any],
+    node_ids: Dict[str, int],
+    source_url: str,
+    chunk_id: Optional[int],
+) -> None:
+    for rel in relationships:
+        validated = _valid_relationship(rel, node_ids)
+        if validated is None:
+            continue
+        src_id, tgt_id, relationship = validated
+        await _upsert_graph_edge(session, src_id, tgt_id, relationship, source_url, chunk_id)
 
 
 async def store_knowledge_graph(
@@ -10,39 +74,11 @@ async def store_knowledge_graph(
     chunk_id: Optional[int],
     create_embedding_fn: Callable[[str], Any],
 ) -> None:
-    entities: List[Dict[str, Any]] = kg_data.get("entities") or []
-    relationships: List[Dict[str, Any]] = kg_data.get("relationships") or []
+    entities, relationships = _kg_lists(kg_data)
     if not entities and not relationships:
         return
-
-    node_ids: Dict[str, int] = {}
-    for entity in entities:
-        if not isinstance(entity, dict):
-            continue
-        name = entity.get("name", "").strip()
-        if not name:
-            continue
-        etype = entity.get("type") or ""
-        desc = entity.get("description") or ""
-        embed_text = f"{name}: {etype}. {desc}".strip()
-        embedding = await create_embedding_fn(embed_text)
-        node_id = await _upsert_graph_node(session, entity, source_url, chunk_id, embedding)
-        node_ids[name] = node_id
-
-    for rel in relationships:
-        if not isinstance(rel, dict):
-            continue
-        src_name = rel.get("source", "").strip()
-        tgt_name = rel.get("target", "").strip()
-        relationship = rel.get("relationship", "").strip()
-        if not src_name or not tgt_name or not relationship:
-            continue
-        src_id = node_ids.get(src_name)
-        tgt_id = node_ids.get(tgt_name)
-        if src_id is None or tgt_id is None:
-            continue
-        await _upsert_graph_edge(session, src_id, tgt_id, relationship, source_url, chunk_id)
-
+    node_ids = await _store_entities(session, entities, source_url, chunk_id, create_embedding_fn)
+    await _store_relationships(session, relationships, node_ids, source_url, chunk_id)
     if node_ids:
         session.commit()
 
