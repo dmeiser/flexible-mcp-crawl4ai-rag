@@ -19,6 +19,7 @@ async def search_documents(
     filter_metadata: Optional[Dict[str, Any]] = None,
     use_hybrid: Optional[bool] = None,
     python_side_vector_search_fn: Optional[Any] = None,
+    heading_path_prefix_filter: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     if not query or not query.strip():
         return []
@@ -29,6 +30,7 @@ async def search_documents(
         return []
 
     filter_json = json.dumps(filter_metadata or {})
+    hp_filter = json.dumps(heading_path_prefix_filter) if heading_path_prefix_filter is not None else None
     return _search_documents_with_embedding(
         session=session,
         query=query,
@@ -39,6 +41,7 @@ async def search_documents(
         hybrid=hybrid,
         crawled_page_cls=crawled_page_cls,
         python_side_vector_search_fn=python_side_vector_search_fn,
+        hp_filter=hp_filter,
     )
 
 
@@ -53,6 +56,7 @@ def _search_documents_with_embedding(
     hybrid: bool,
     crawled_page_cls: Any,
     python_side_vector_search_fn: Optional[Any],
+    hp_filter: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     vector_results = _vector_search_rows_to_results(
         _run_vector_search(
@@ -64,6 +68,7 @@ def _search_documents_with_embedding(
             filter_metadata=filter_metadata,
             crawled_page_cls=crawled_page_cls,
             python_side_vector_search_fn=python_side_vector_search_fn,
+            hp_filter=hp_filter,
         )
     )
 
@@ -75,6 +80,7 @@ def _search_documents_with_embedding(
         query=query,
         filter_json=filter_json,
         match_count=match_count,
+        hp_filter=hp_filter,
     )
     return _merge_hybrid_results(vector_results=vector_results, fts_raw=fts_raw, match_count=match_count)
 
@@ -90,7 +96,9 @@ def search_documents_with_embedding(
     hybrid: bool,
     crawled_page_cls: Any,
     python_side_vector_search_fn: Optional[Any] = None,
+    heading_path_prefix_filter: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
+    hp_filter = json.dumps(heading_path_prefix_filter) if heading_path_prefix_filter is not None else None
     return _search_documents_with_embedding(
         session=session,
         query=query,
@@ -101,6 +109,7 @@ def search_documents_with_embedding(
         hybrid=hybrid,
         crawled_page_cls=crawled_page_cls,
         python_side_vector_search_fn=python_side_vector_search_fn,
+        hp_filter=hp_filter,
     )
 
 
@@ -127,16 +136,19 @@ def _run_vector_search(
     filter_metadata: Optional[Dict[str, Any]],
     crawled_page_cls: Any,
     python_side_vector_search_fn: Optional[Any],
+    hp_filter: Optional[str] = None,
 ) -> Sequence[Any]:
     try:
         return session.exec(  # type: ignore[call-overload]
             text(
                 "SELECT id, url, chunk_number, content, metadata, similarity "
-                "FROM match_crawled_pages(CAST(:emb AS vector), :cnt, CAST(:filt AS jsonb))"
+                "FROM match_crawled_pages(CAST(:emb AS vector), :cnt, CAST(:filt AS jsonb)) "
+                "WHERE (CAST(:hp_filter AS jsonb) IS NULL OR metadata->'heading_path' @> CAST(:hp_filter AS jsonb))"
             ).bindparams(
                 emb=str(query_embedding),
                 cnt=match_count * 2 if hybrid else match_count,
                 filt=filter_json,
+                hp_filter=hp_filter,
             )
         ).all()
     except Exception:
@@ -171,6 +183,7 @@ def _run_fts_search(
     query: str,
     filter_json: str,
     match_count: int,
+    hp_filter: Optional[str] = None,
 ) -> Sequence[Any]:
     try:
         return session.exec(  # type: ignore[call-overload]
@@ -182,8 +195,9 @@ def _run_fts_search(
                 "AND is_active = TRUE "
                 "AND tombstoned_at IS NULL "
                 "AND CAST(:filt AS jsonb) <@ metadata "
+                "AND (CAST(:hp_filter AS jsonb) IS NULL OR metadata->'heading_path' @> CAST(:hp_filter AS jsonb)) "
                 "ORDER BY rank DESC LIMIT :cnt"
-            ).bindparams(q=query, filt=filter_json, cnt=match_count * 2)
+            ).bindparams(q=query, filt=filter_json, cnt=match_count * 2, hp_filter=hp_filter)
         ).all()
     except Exception:
         return []

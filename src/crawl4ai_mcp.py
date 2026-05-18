@@ -237,6 +237,9 @@ mcp.tool()(tool_definitions.get_markdown_by_url)
 if settings.USE_AGENTIC_RAG:
     mcp.tool()(tool_definitions.search_code_examples)
 
+if settings.USE_GRAPH_INDEX:
+    mcp.tool()(tool_definitions.search_knowledge_graph)
+
 # Freshness/eviction maintenance remains scheduler-driven and is intentionally
 # not exposed as MCP admin/ops endpoints.
 

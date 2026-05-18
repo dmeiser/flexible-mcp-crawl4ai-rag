@@ -132,6 +132,28 @@ class Source(SQLModel, table=True):
     summary: Optional[str] = None
 
 
+class GraphNode(SQLModel, table=True):
+    """Knowledge-graph entity extracted from crawled pages."""
+
+    __tablename__ = "graph_nodes"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    entity_name: str = Field(index=True)
+    entity_type: str = Field(index=True)
+    description: str = Field(default="")
+    source_url: str = Field(index=True)
+    embedding: List[float] = Field(sa_column=Column(Vector(settings.EMBEDDING_DIM)))
+
+
+class GraphEdge(SQLModel, table=True):
+    """Knowledge-graph relationship between two entities."""
+
+    __tablename__ = "graph_edges"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    source_node_id: int = Field(foreign_key="graph_nodes.id", index=True)
+    target_node_id: int = Field(foreign_key="graph_nodes.id", index=True)
+    relationship_type: str
+
+
 def get_session() -> Generator[Session, None, None]:
     with Session(engine) as session:
         yield session

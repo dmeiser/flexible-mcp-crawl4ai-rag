@@ -57,6 +57,7 @@ from src.services.reranking_service import rerank_results
 from src.services.scoring_service import compute_staleness_score, compute_value_score
 from src.services.search_service import search_code_examples as _search_code_examples
 from src.services.search_service import search_documents
+from src.services.search_service import search_knowledge_graph as _search_knowledge_graph
 from src.services.tombstone_service import get_db_size_bytes, tombstone_records
 from src.services.url_scorers import build_url_scorer, get_supported_scorer_types
 from src.services.web_crawler import (
@@ -5719,6 +5720,7 @@ async def search_documents_v2(
     as_of: Optional[str] = None,
     recency_bias: float = 0.0,
     include_provenance: bool = False,
+    heading_path_prefix: Optional[List[str]] = None,
 ) -> str:
     """Taxonomy-native retrieval tool."""
     try:
@@ -5729,6 +5731,7 @@ async def search_documents_v2(
                 query,
                 match_count=match_count,
                 filter_metadata=filter_meta or None,
+                heading_path_prefix_filter=heading_path_prefix,
             )
 
         as_of_dt = _parse_datetime_utc(as_of) if as_of else None
@@ -5834,6 +5837,35 @@ async def search_code_examples(
         )
     except Exception as exc:
         logger.error(f"search_code_examples: {exc}", exc_info=True)
+        return json.dumps({"success": False, "query": query, "error": str(exc)}, indent=2)
+
+
+async def search_knowledge_graph(
+    ctx: Context,
+    query: str,
+    match_count: int = 5,
+    depth: int = 2,
+    entity_type: Optional[str] = None,
+) -> str:
+    """
+    Search the knowledge graph for entities and relationships relevant to the query.
+    Only available when USE_GRAPH_INDEX=true.
+
+    Args:
+        ctx: MCP context.
+        query: Natural language query.
+        match_count: Number of seed nodes to retrieve.
+        depth: Graph traversal depth.
+        entity_type: Optional entity type filter (e.g. TOOL, CONCEPT, API).
+    """
+    try:
+        with next(get_session()) as session:
+            results = await _search_knowledge_graph(
+                session, query, match_count=match_count, depth=depth, entity_type_filter=entity_type
+            )
+        return json.dumps({"success": True, "query": query, "results": results}, indent=2)
+    except Exception as exc:
+        logger.error(f"search_knowledge_graph: {exc}", exc_info=True)
         return json.dumps({"success": False, "query": query, "error": str(exc)}, indent=2)
 
 

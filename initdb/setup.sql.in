@@ -383,5 +383,55 @@ BEGIN
     ) THEN
         CREATE POLICY allow_public_read ON eviction_audit_log FOR SELECT TO PUBLIC USING (true);
     END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies WHERE tablename = 'graph_nodes' AND policyname = 'allow_public_read'
+    ) THEN
+        CREATE POLICY allow_public_read ON graph_nodes FOR SELECT TO PUBLIC USING (true);
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies WHERE tablename = 'graph_edges' AND policyname = 'allow_public_read'
+    ) THEN
+        CREATE POLICY allow_public_read ON graph_edges FOR SELECT TO PUBLIC USING (true);
+    END IF;
 END;
 $$;
+
+-- -----------------------------------------------------------------------
+-- graph_nodes: extracted knowledge-graph entities
+-- -----------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS graph_nodes (
+    id           BIGSERIAL PRIMARY KEY,
+    entity_name  TEXT NOT NULL,
+    entity_type  TEXT NOT NULL,
+    description  TEXT NOT NULL DEFAULT '',
+    source_url   TEXT NOT NULL,
+    chunk_id     BIGINT REFERENCES crawled_pages(id) ON DELETE SET NULL,
+    embedding    VECTOR(:embedding_dim),
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (entity_name, source_url)
+);
+
+CREATE INDEX IF NOT EXISTS graph_nodes_embedding_idx ON graph_nodes USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+CREATE INDEX IF NOT EXISTS graph_nodes_entity_type_idx ON graph_nodes (entity_type);
+CREATE INDEX IF NOT EXISTS graph_nodes_source_url_idx ON graph_nodes (source_url);
+
+ALTER TABLE graph_nodes ENABLE ROW LEVEL SECURITY;
+
+-- -----------------------------------------------------------------------
+-- graph_edges: extracted knowledge-graph relationships
+-- -----------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS graph_edges (
+    id               BIGSERIAL PRIMARY KEY,
+    source_node_id   BIGINT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+    target_node_id   BIGINT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+    relationship     TEXT NOT NULL,
+    source_url       TEXT NOT NULL,
+    chunk_id         BIGINT REFERENCES crawled_pages(id) ON DELETE SET NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (source_node_id, target_node_id, relationship)
+);
+
+CREATE INDEX IF NOT EXISTS graph_edges_source_idx ON graph_edges (source_node_id);
+CREATE INDEX IF NOT EXISTS graph_edges_target_idx ON graph_edges (target_node_id);
+
+ALTER TABLE graph_edges ENABLE ROW LEVEL SECURITY;

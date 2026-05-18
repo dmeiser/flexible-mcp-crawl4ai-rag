@@ -158,7 +158,7 @@ class TestSearchDocumentsV2:
         ctx = _make_ctx()
         captured: dict = {}
 
-        async def fake_search(sess, q, match_count, filter_metadata):
+        async def fake_search(sess, q, match_count, filter_metadata, heading_path_prefix_filter=None):
             captured["filter"] = filter_metadata
             return []
 
@@ -176,7 +176,7 @@ class TestSearchDocumentsV2:
         ctx = _make_ctx()
         captured: dict = {}
 
-        async def fake_search(sess, q, match_count, filter_metadata):
+        async def fake_search(sess, q, match_count, filter_metadata, heading_path_prefix_filter=None):
             captured["filter"] = filter_metadata
             return []
 
@@ -206,7 +206,7 @@ class TestSearchDocumentsV2:
         ctx = _make_ctx()
         captured: dict = {}
 
-        async def fake_search(sess, q, match_count, filter_metadata):
+        async def fake_search(sess, q, match_count, filter_metadata, heading_path_prefix_filter=None):
             captured["filter"] = filter_metadata
             return []
 
@@ -3110,3 +3110,40 @@ class TestEligibleReembedRowId:
         row.id = 5
         row.hit_count = 0
         assert td._eligible_reembed_row_id(row, {5}) is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: search_knowledge_graph tool
+# ---------------------------------------------------------------------------
+
+
+class TestSearchKnowledgeGraphTool:
+    @pytest.mark.asyncio
+    async def test_success(self):
+        ctx = _make_ctx()
+        graph_results = [{"entity_name": "FastMCP", "url": "https://x.com", "similarity_score": 0.9}]
+        with (
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
+            patch(
+                "src.tools.tool_definitions._search_knowledge_graph",
+                new_callable=AsyncMock,
+                return_value=graph_results,
+            ),
+        ):
+            result = await td.search_knowledge_graph(ctx, "MCP framework")
+        data = json.loads(result)
+        assert data["success"] is True
+        assert len(data["results"]) == 1
+        assert data["results"][0]["entity_name"] == "FastMCP"
+
+    @pytest.mark.asyncio
+    async def test_exception_returns_error_json(self):
+        ctx = _make_ctx()
+        with (
+            patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
+            patch("src.tools.tool_definitions._search_knowledge_graph", side_effect=RuntimeError("graph fail")),
+        ):
+            result = await td.search_knowledge_graph(ctx, "q")
+        data = json.loads(result)
+        assert data["success"] is False
+        assert "graph fail" in data["error"]

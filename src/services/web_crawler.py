@@ -14,6 +14,8 @@ from src.config import ChunkStrategy, settings
 
 logger = logging.getLogger(__name__)
 
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
+
 # Ensure NLTK punkt tokenizer is available
 try:
     nltk.data.find("tokenizers/punkt_tab")
@@ -211,6 +213,106 @@ async def chunk_text_according_to_settings(text: str, strategy: Optional[str] = 
     effective_strategy = _resolve_chunk_strategy(strategy)
     chunking_function = _chunking_function(effective_strategy)
     return chunking_function(text, size, overlap)
+
+
+# ---------------------------------------------------------------------------
+# Heading-aware chunking
+# ---------------------------------------------------------------------------
+
+
+def _parse_markdown_sections(text: str) -> list[dict]:
+    """Parse text into sections delimited by markdown headings.
+
+    Returns list of dicts with keys: level (int), heading (str), content (str).
+    Falls back to single section with level=0 if no headings found.
+    """
+    matches = list(_HEADING_RE.finditer(text))
+    if not matches:
+        return [{"level": 0, "heading": "", "content": text.strip()}]
+
+    sections = []
+    for i, m in enumerate(matches):
+        level = len(m.group(1))
+        heading = m.group(2).strip()
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        content = text[start:end].strip()
+        sections.append({"level": level, "heading": heading, "content": content})
+    return sections
+
+
+def _build_heading_path(stack: list[dict]) -> list[str]:
+    return [s["heading"] for s in stack]
+
+
+def heading_chunk_text(text: str, size: int, overlap: int) -> list[tuple[str, list[str]]]:
+    """Chunk text respecting markdown section boundaries.
+
+    Returns list of (chunk_text, heading_path) tuples.
+    heading_path is a list of heading strings from outermost to current section.
+    Falls back to paragraph chunking with empty paths if no headings.
+    """
+    sections = _parse_markdown_sections(text)
+
+    if len(sections) == 1 and sections[0]["level"] == 0:
+        chunks = _paragraph_chunking(text, size, overlap)
+        return [(c, []) for c in chunks]
+
+    results: list[tuple[str, list[str]]] = []
+    stack: list[dict] = []
+
+    for section in sections:
+        level = section["level"]
+        while stack and stack[-1]["level"] >= level:
+            stack.pop()
+        stack.append(section)
+
+        path = _build_heading_path(stack)
+        content = section["content"]
+        if not content:
+            continue
+
+        sub_chunks = _paragraph_chunking(content, size, overlap)
+        for chunk in sub_chunks:
+            results.append((chunk, list(path)))
+
+    if not results:
+        chunks = _paragraph_chunking(text, size, overlap)
+        return [(c, []) for c in chunks]
+
+    return results
+
+
+async def chunk_text_with_heading_metadata(
+    text: str,
+    strategy: Optional[str] = None,
+) -> list[tuple[str, dict]]:
+    """Chunk text and return (chunk, metadata) pairs.
+
+    For HEADING strategy: metadata includes heading_path (list[str]) and heading_level (int).
+    For other strategies: delegates to chunk_text_according_to_settings.
+    """
+    from src.config import ChunkStrategy
+
+    effective_strategy = strategy
+    if effective_strategy is None:
+        import src.utils as _utils
+
+        effective_strategy = _utils.settings.CHUNK_STRATEGY
+
+    if effective_strategy == ChunkStrategy.HEADING or effective_strategy == ChunkStrategy.HEADING.value:
+        import src.utils as _utils
+
+        size = _utils.settings.CHUNK_SIZE
+        overlap = _utils.settings.CHUNK_OVERLAP
+        pairs = heading_chunk_text(text, size, overlap)
+        return [
+            (chunk, {"heading_path": path, "heading_level": len(path)})
+            for chunk, path in pairs
+        ]
+    else:
+        chunks = await chunk_text_according_to_settings(text)
+        return [(c, {"heading_path": [], "heading_level": 0}) for c in chunks]
 
 
 # ---------------------------------------------------------------------------
