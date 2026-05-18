@@ -70,7 +70,8 @@ Freshness and storage lifecycle operations run in background scheduler jobs only
 - `search_raw_markdown`
 - `search_fit_markdown`
 - `search_structured_content`
-- `search_code_examples` (feature-flagged)
+- `search_code_examples` (feature-flagged: `USE_AGENTIC_RAG`)
+- `search_knowledge_graph` (feature-flagged: `USE_GRAPH_INDEX`)
 - `get_document_by_id`
 - `get_markdown_by_url`
 - `get_fit_markdown_by_url`
@@ -109,6 +110,8 @@ Primary persisted entities:
 - `source_policies`
 - `storage_policies`
 - `eviction_audit_log`
+- `graph_nodes` (entities — enabled when `USE_GRAPH_INDEX=true`)
+- `graph_edges` (relationships — enabled when `USE_GRAPH_INDEX=true`)
 
 Freshness metadata includes:
 - `first_seen_at`, `last_seen_at`, `last_crawled_at`
