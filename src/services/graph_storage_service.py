@@ -54,7 +54,7 @@ async def _upsert_graph_node(
         text(
             """
             INSERT INTO graph_nodes (entity_name, entity_type, source_url, chunk_id, description, embedding)
-            VALUES (:name, :etype, :source_url, :chunk_id, :desc, :emb::vector)
+            VALUES (:name, :etype, :source_url, :chunk_id, :desc, CAST(:emb AS vector))
             ON CONFLICT (entity_name, source_url) DO UPDATE
                 SET entity_type = EXCLUDED.entity_type,
                     description  = EXCLUDED.description,
