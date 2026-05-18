@@ -47,7 +47,7 @@ from src.services.document_storage_service import (
     add_code_examples_to_db,
     add_documents_to_db,
 )
-from src.services.ingestion import store_crawled_documents
+from src.services.ingestion import store_crawled_documents, index_knowledge_graphs
 from src.services.metadata_extractor import (
     extract_link_graph,
     extract_media_metadata,
@@ -2280,6 +2280,7 @@ async def _index_crawled_docs(
                 payload["db_chunks"],
                 payload["db_fulldocs"],
             )
+            await index_knowledge_graphs(session, payload["db_urls"], payload["db_contents"])
         pages_indexed = len(set(payload["db_urls"]))
     indexed_variant_keys = cast(set[str], payload["indexed_variant_keys"])
     fallback_notes = cast(List[str], payload["fallback_notes"])
@@ -4836,6 +4837,7 @@ async def _index_markdown_variants_payload(
                 payload["db_chunks"],
                 payload["db_fulldocs"],
             )
+            await index_knowledge_graphs(session, payload["db_urls"], payload["db_contents"])
     else:
         chunks_stored = 0
     return chunks_stored, cast(List[str], payload["indexed_variants"]), resolved_fallback_notes

@@ -216,12 +216,12 @@ async def store_crawled_documents(
             all_full_docs,
             embed_texts=all_embed_texts,
         )
-        await _index_knowledge_graphs(session, all_urls, all_contents, endpoint_factory)
+        await index_knowledge_graphs(session, all_urls, all_contents, endpoint_factory)
 
     return len(crawl_results), len(all_contents)
 
 
-async def _index_knowledge_graphs(
+async def index_knowledge_graphs(
     session: Session,
     urls: List[str],
     contents: List[str],

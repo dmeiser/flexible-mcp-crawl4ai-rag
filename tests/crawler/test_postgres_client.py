@@ -304,7 +304,7 @@ class TestStoreCrawledDocuments:
 
 
 # ---------------------------------------------------------------------------
-# Tests: _index_knowledge_graphs
+# Tests: index_knowledge_graphs
 # ---------------------------------------------------------------------------
 
 
@@ -312,21 +312,21 @@ class TestIndexKnowledgeGraphs:
     @pytest.mark.asyncio
     async def test_no_op_when_graph_index_disabled(self):
         """Returns immediately when USE_GRAPH_INDEX is False."""
-        from src.services.ingestion import _index_knowledge_graphs
+        from src.services.ingestion import index_knowledge_graphs
 
         session = MagicMock()
         mock_settings = MagicMock()
         mock_settings.USE_GRAPH_INDEX = False
 
         with patch("src.config.settings", mock_settings):
-            await _index_knowledge_graphs(session, ["https://x.com"], ["content"], MagicMock())
+            await index_knowledge_graphs(session, ["https://x.com"], ["content"], MagicMock())
 
         session.execute.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_op_when_no_model_name(self):
         """Returns immediately when no KG model name is configured."""
-        from src.services.ingestion import _index_knowledge_graphs
+        from src.services.ingestion import index_knowledge_graphs
 
         session = MagicMock()
         mock_settings = MagicMock()
@@ -334,14 +334,14 @@ class TestIndexKnowledgeGraphs:
         mock_settings.effective_kg_model_name = None
 
         with patch("src.config.settings", mock_settings):
-            await _index_knowledge_graphs(session, ["https://x.com"], ["content"], MagicMock())
+            await index_knowledge_graphs(session, ["https://x.com"], ["content"], MagicMock())
 
         session.execute.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_op_when_no_endpoint_factory(self):
         """Returns immediately when endpoint_factory is None."""
-        from src.services.ingestion import _index_knowledge_graphs
+        from src.services.ingestion import index_knowledge_graphs
 
         session = MagicMock()
         mock_settings = MagicMock()
@@ -349,14 +349,14 @@ class TestIndexKnowledgeGraphs:
         mock_settings.effective_kg_model_name = "some-model"
 
         with patch("src.config.settings", mock_settings):
-            await _index_knowledge_graphs(session, ["https://x.com"], ["content"], None)
+            await index_knowledge_graphs(session, ["https://x.com"], ["content"], None)
 
         session.execute.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_extracts_and_stores_kg(self):
         """When enabled, extracts KG and stores it for each URL."""
-        from src.services.ingestion import _index_knowledge_graphs
+        from src.services.ingestion import index_knowledge_graphs
 
         session = MagicMock()
         mock_settings = MagicMock()
@@ -381,7 +381,7 @@ class TestIndexKnowledgeGraphs:
             patch("src.services.graph_storage_service.store_knowledge_graph", new_callable=AsyncMock) as mock_store,
             patch("src.utils.create_embedding", new_callable=AsyncMock, return_value=[0.1, 0.2]),
         ):
-            await _index_knowledge_graphs(session, ["https://x.com/page"], ["page content"], endpoint_factory)
+            await index_knowledge_graphs(session, ["https://x.com/page"], ["page content"], endpoint_factory)
 
         mock_extractor.extract_knowledge_graph.assert_called_once()
         mock_store.assert_called_once()
