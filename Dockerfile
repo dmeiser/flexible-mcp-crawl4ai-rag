@@ -1,4 +1,4 @@
-ARG PLAYWRIGHT_BASE_IMAGE=mcr.microsoft.com/playwright/python:v1.58.0-noble
+ARG PLAYWRIGHT_BASE_IMAGE=mcr.microsoft.com/playwright/python:v1.60.0-noble
 
 # ---- Builder Stage ----
 FROM ${PLAYWRIGHT_BASE_IMAGE} AS builder
