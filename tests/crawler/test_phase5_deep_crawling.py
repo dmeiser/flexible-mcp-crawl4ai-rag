@@ -82,7 +82,7 @@ class TestCrawlToMarkdownWithDeepCrawling:
         ctx = _make_ctx(crawler=mock_crawler)
 
         with patch(
-            "src.tools.tool_definitions.chunk_text_according_to_settings", new_callable=AsyncMock, return_value=[]
+            "src.tools.tool_definitions.chunk_text_with_heading_metadata", new_callable=AsyncMock, return_value=[]
         ):
             result = await td.crawl_to_markdown(ctx, "https://example.com")
 
@@ -105,7 +105,7 @@ class TestCrawlToMarkdownWithDeepCrawling:
         ctx = _make_ctx(crawler=mock_crawler)
 
         with patch(
-            "src.tools.tool_definitions.chunk_text_according_to_settings", new_callable=AsyncMock, return_value=[]
+            "src.tools.tool_definitions.chunk_text_with_heading_metadata", new_callable=AsyncMock, return_value=[]
         ):
             # Test lower bound clamping
             result = await td.crawl_to_markdown(ctx, "https://x.com", max_depth=0)
@@ -130,7 +130,7 @@ class TestCrawlToMarkdownWithDeepCrawling:
             return_value=[mock_result],
         ) as mock_recursive:
             with patch(
-                "src.tools.tool_definitions.chunk_text_according_to_settings", new_callable=AsyncMock, return_value=[]
+                "src.tools.tool_definitions.chunk_text_with_heading_metadata", new_callable=AsyncMock, return_value=[]
             ):
                 result = await td.crawl_to_markdown(ctx, "https://example.com", max_depth=3, follow_links=True)
 
@@ -162,7 +162,7 @@ class TestCrawlToMarkdownWithDeepCrawling:
             return_value=mock_results,
         ):
             with patch(
-                "src.tools.tool_definitions.chunk_text_according_to_settings", new_callable=AsyncMock, return_value=[]
+                "src.tools.tool_definitions.chunk_text_with_heading_metadata", new_callable=AsyncMock, return_value=[]
             ):
                 result = await td.crawl_to_markdown(ctx, "https://example.com", max_depth=2, follow_links=True)
 
@@ -191,7 +191,7 @@ class TestCrawlToMarkdownWithDeepCrawling:
 
         captured_metas = []
 
-        async def capture_add_documents(session, urls, contents, metas, chunks, fulldocs):
+        async def capture_add_documents(session, urls, contents, metas, chunks, fulldocs, embed_texts=None):
             captured_metas.extend(metas)
             return len(urls)
 
@@ -201,9 +201,9 @@ class TestCrawlToMarkdownWithDeepCrawling:
             return_value=[mock_result],
         ):
             with patch(
-                "src.tools.tool_definitions.chunk_text_according_to_settings",
+                "src.tools.tool_definitions.chunk_text_with_heading_metadata",
                 new_callable=AsyncMock,
-                return_value=["Chunk"],
+                return_value=[("Chunk", {"heading_path": [], "heading_level": 0})],
             ):
                 with patch(
                     "src.tools.tool_definitions.add_documents_to_db",
@@ -632,7 +632,7 @@ class TestAdditionalToolPathCoverage:
 
         captured_metas = []
 
-        async def _capture_add(session, urls, contents, metas, chunks, fulldocs):
+        async def _capture_add(session, urls, contents, metas, chunks, fulldocs, embed_texts=None):
             captured_metas.extend(metas)
             return len(urls)
 
@@ -643,9 +643,9 @@ class TestAdditionalToolPathCoverage:
             ),
             patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
             patch(
-                "src.tools.tool_definitions.chunk_text_according_to_settings",
+                "src.tools.tool_definitions.chunk_text_with_heading_metadata",
                 new_callable=AsyncMock,
-                return_value=["chunk"],
+                return_value=[("chunk", {"heading_path": [], "heading_level": 0})],
             ),
             patch("src.tools.tool_definitions.add_documents_to_db", new_callable=AsyncMock, side_effect=_capture_add),
         ):
@@ -677,7 +677,7 @@ class TestAdditionalToolPathCoverage:
 
         captured_metas = []
 
-        async def _capture_add(session, urls, contents, metas, chunks, fulldocs):
+        async def _capture_add(session, urls, contents, metas, chunks, fulldocs, embed_texts=None):
             captured_metas.extend(metas)
             return len(urls)
 
@@ -688,9 +688,9 @@ class TestAdditionalToolPathCoverage:
             ),
             patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
             patch(
-                "src.tools.tool_definitions.chunk_text_according_to_settings",
+                "src.tools.tool_definitions.chunk_text_with_heading_metadata",
                 new_callable=AsyncMock,
-                return_value=["chunk"],
+                return_value=[("chunk", {"heading_path": [], "heading_level": 0})],
             ),
             patch("src.tools.tool_definitions.add_documents_to_db", new_callable=AsyncMock, side_effect=_capture_add),
         ):
@@ -715,9 +715,9 @@ class TestAdditionalToolPathCoverage:
             ),
             patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
             patch(
-                "src.tools.tool_definitions.chunk_text_according_to_settings",
+                "src.tools.tool_definitions.chunk_text_with_heading_metadata",
                 new_callable=AsyncMock,
-                return_value=["chunk"],
+                return_value=[("chunk", {"heading_path": [], "heading_level": 0})],
             ),
             patch("src.tools.tool_definitions.add_documents_to_db", new_callable=AsyncMock, return_value=1),
         ):
@@ -750,9 +750,9 @@ class TestAdditionalToolPathCoverage:
                 return_value=(["fit_markdown"], "both-by-default", None, []),
             ),
             patch(
-                "src.tools.tool_definitions.chunk_text_according_to_settings",
+                "src.tools.tool_definitions.chunk_text_with_heading_metadata",
                 new_callable=AsyncMock,
-                return_value=["chunk"],
+                return_value=[("chunk", {"heading_path": [], "heading_level": 0})],
             ) as chunker,
             patch("src.tools.tool_definitions.add_documents_to_db", new_callable=AsyncMock, return_value=0),
         ):
@@ -798,7 +798,7 @@ class TestAdditionalToolPathCoverage:
 
         captured_metas = []
 
-        async def cap_add(session, urls, contents, metas, chunks, fulldocs):
+        async def cap_add(session, urls, contents, metas, chunks, fulldocs, embed_texts=None):
             captured_metas.extend(metas)
             return len(urls)
 
@@ -810,9 +810,9 @@ class TestAdditionalToolPathCoverage:
             ),
             patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
             patch(
-                "src.tools.tool_definitions.chunk_text_according_to_settings",
+                "src.tools.tool_definitions.chunk_text_with_heading_metadata",
                 new_callable=AsyncMock,
-                return_value=["c1"],
+                return_value=[("c1", {"heading_path": [], "heading_level": 0})],
             ),
             patch("src.tools.tool_definitions.add_documents_to_db", new_callable=AsyncMock, side_effect=cap_add),
         ):
@@ -838,7 +838,7 @@ class TestAdditionalToolPathCoverage:
 
         captured_metas = []
 
-        async def cap_add(session, urls, contents, metas, chunks, fulldocs):
+        async def cap_add(session, urls, contents, metas, chunks, fulldocs, embed_texts=None):
             captured_metas.extend(metas)
             return len(urls)
 
@@ -848,9 +848,9 @@ class TestAdditionalToolPathCoverage:
             ),
             patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
             patch(
-                "src.tools.tool_definitions.chunk_text_according_to_settings",
+                "src.tools.tool_definitions.chunk_text_with_heading_metadata",
                 new_callable=AsyncMock,
-                return_value=["c1"],
+                return_value=[("c1", {"heading_path": [], "heading_level": 0})],
             ),
             patch("src.tools.tool_definitions.add_documents_to_db", new_callable=AsyncMock, side_effect=cap_add),
         ):
@@ -2065,7 +2065,7 @@ class TestPhase1TaxonomyWrappers:
 
         captured_metas = []
 
-        async def _capture_add(session, urls, contents, metas, chunks, fulldocs):
+        async def _capture_add(session, urls, contents, metas, chunks, fulldocs, embed_texts=None):
             captured_metas.extend(metas)
             return len(urls)
 
@@ -2076,9 +2076,9 @@ class TestPhase1TaxonomyWrappers:
             ),
             patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
             patch(
-                "src.tools.tool_definitions.chunk_text_according_to_settings",
+                "src.tools.tool_definitions.chunk_text_with_heading_metadata",
                 new_callable=AsyncMock,
-                return_value=["c"],
+                return_value=[("c", {"heading_path": [], "heading_level": 0})],
             ),
             patch("src.tools.tool_definitions.add_documents_to_db", new_callable=AsyncMock, side_effect=_capture_add),
         ):
@@ -2097,9 +2097,9 @@ class TestPhase1TaxonomyWrappers:
             ),
             patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
             patch(
-                "src.tools.tool_definitions.chunk_text_according_to_settings",
+                "src.tools.tool_definitions.chunk_text_with_heading_metadata",
                 new_callable=AsyncMock,
-                return_value=["c"],
+                return_value=[("c", {"heading_path": [], "heading_level": 0})],
             ),
             patch("src.tools.tool_definitions.add_documents_to_db", new_callable=AsyncMock, return_value=1),
         ):
@@ -2131,9 +2131,9 @@ class TestPhase1TaxonomyWrappers:
             ),
             patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
             patch(
-                "src.tools.tool_definitions.chunk_text_according_to_settings",
+                "src.tools.tool_definitions.chunk_text_with_heading_metadata",
                 new_callable=AsyncMock,
-                return_value=["c"],
+                return_value=[("c", {"heading_path": [], "heading_level": 0})],
             ) as chunker,
             patch("src.tools.tool_definitions.add_documents_to_db", new_callable=AsyncMock, return_value=0),
         ):
@@ -2183,15 +2183,15 @@ class TestPhase1TaxonomyWrappers:
         ctx = _make_ctx()
         captured_metas = []
 
-        async def _capture_add(session, urls, contents, metas, chunks, fulldocs):
+        async def _capture_add(session, urls, contents, metas, chunks, fulldocs, embed_texts=None):
             captured_metas.extend(metas)
             return len(urls)
 
         with (
             patch(
-                "src.tools.tool_definitions.chunk_text_according_to_settings",
+                "src.tools.tool_definitions.chunk_text_with_heading_metadata",
                 new_callable=AsyncMock,
-                return_value=["c1", "c2"],
+                return_value=[("c1", {"heading_path": [], "heading_level": 0}), ("c2", {"heading_path": [], "heading_level": 0})],
             ),
             patch("src.tools.tool_definitions.get_session", side_effect=_make_get_session()),
             patch("src.tools.tool_definitions.add_documents_to_db", new_callable=AsyncMock, side_effect=_capture_add),
@@ -2211,7 +2211,7 @@ class TestPhase1TaxonomyWrappers:
         assert empty["success"] is False
 
         with patch(
-            "src.tools.tool_definitions.chunk_text_according_to_settings",
+            "src.tools.tool_definitions.chunk_text_with_heading_metadata",
             new_callable=AsyncMock,
             side_effect=RuntimeError("idx-boom"),
         ):

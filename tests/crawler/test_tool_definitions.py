@@ -2982,6 +2982,7 @@ class TestStoreIndexMarkdownPayload:
             "db_metas": [],
             "db_chunks": [],
             "db_fulldocs": [],
+            "db_embed_texts": [],
         }
         with patch("src.tools.tool_definitions.add_documents_to_db", new=AsyncMock(return_value=0)):
             stored, chunk_id = await td._store_index_markdown_payload(session, "https://x.com", payload)
