@@ -43,6 +43,9 @@ async def store_knowledge_graph(
             continue
         await _upsert_graph_edge(session, src_id, tgt_id, relationship, source_url, chunk_id)
 
+    if node_ids:
+        session.commit()
+
 
 async def _upsert_graph_node(
     session: Any,
