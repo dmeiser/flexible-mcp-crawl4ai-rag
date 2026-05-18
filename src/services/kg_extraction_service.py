@@ -62,6 +62,7 @@ class KnowledgeGraphExtractionService:
                     "model": settings.effective_kg_model_name,
                     "messages": [{"role": "user", "content": self._extraction_prompt(text)}],
                     "max_tokens": 2048,
+                    "response_format": {"type": "json_object"},
                 },
                 max_retries=3,
                 retry_delay_seconds=1.0,
