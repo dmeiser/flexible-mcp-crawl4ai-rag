@@ -86,5 +86,5 @@ class KnowledgeGraphExtractionService:
             return {"entities": payload["entities"], "relationships": payload["relationships"]}
         except Exception as exc:
             if self._logger:
-                self._logger.warning(f"KG extraction LLM call failed for {source_url}: {exc}")
+                self._logger.error("KG extraction LLM call failed for %s: %s", source_url, exc, exc_info=True)
             return empty

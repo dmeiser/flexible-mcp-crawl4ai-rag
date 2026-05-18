@@ -232,6 +232,8 @@ async def index_knowledge_graphs(
     from src.services.kg_extraction_service import KnowledgeGraphExtractionService
     from src.utils import create_embedding
 
+    logger.debug("index_knowledge_graphs called: USE_GRAPH_INDEX=%s model=%s urls=%d", settings.USE_GRAPH_INDEX, settings.effective_kg_model_name, len(urls))
+
     if not (settings.USE_GRAPH_INDEX and settings.effective_kg_model_name):
         return
 
@@ -249,5 +251,7 @@ async def index_knowledge_graphs(
     factory = endpoint_factory if endpoint_factory is not None else _default_factory
     extractor = KnowledgeGraphExtractionService(endpoint_factory=factory, logger=logger)
     for url, content in zip(urls, contents):
+        logger.info("Extracting KG for %s (content len=%d)", url, len(content))
         kg_data = await extractor.extract_knowledge_graph(settings, content, url)
+        logger.info("KG extracted for %s: %d entities, %d relationships", url, len(kg_data.get("entities", [])), len(kg_data.get("relationships", [])))
         await store_knowledge_graph(session, kg_data, url, None, create_embedding)

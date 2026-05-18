@@ -63,7 +63,7 @@ class TestKnowledgeGraphExtractionService:
         svc = KnowledgeGraphExtractionService(endpoint_factory=lambda **_kw: endpoint, logger=logger)
         result = await svc.extract_knowledge_graph(_make_settings(), "text", "https://x.com")
         assert result == {"entities": [], "relationships": []}
-        logger.warning.assert_called_once()
+        logger.error.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_extract_missing_keys_returns_empty(self):
