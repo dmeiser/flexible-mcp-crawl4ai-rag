@@ -46,13 +46,14 @@ cp .env.example .env
 | `BATCH_SIZE` | `50` | no | Chunks embedded per batch |
 | `CHUNK_SIZE` | `1000` | no | Target tokens per chunk |
 | `CHUNK_OVERLAP` | `200` | no | Overlap tokens between adjacent chunks |
-| `CHUNK_STRATEGY` | `paragraph` | no | `paragraph` or `fixed` |
+| `CHUNK_STRATEGY` | `paragraph` | no | `paragraph`, `sentence`, `fixed`, or `heading` |
 | `MARKDOWN_INDEX_POLICY` | `both-by-default` | no | `both-by-default`, `raw-only`, or `fit-only` |
 | `MARKDOWN_FALLBACK_ENABLED` | `true` | no | Fall back to raw markdown when fit markdown is empty |
 | `USE_CONTEXTUAL_EMBEDDINGS` | `false` | no | Prepend LLM-generated context to each chunk before embedding |
 | `USE_HYBRID_SEARCH` | `false` | no | Combine vector + full-text search (BM25/tsvector) |
 | `USE_AGENTIC_RAG` | `false` | no | Expose the feature-flagged `search_code_examples` tool |
 | `USE_RERANKING` | `false` | no | Cross-encoder re-ranking pass on retrieved results |
+| `USE_GRAPH_INDEX` | `false` | no | Extract and index a knowledge graph at ingest time; enables `search_knowledge_graph` |
 | `DEFAULT_LLM_PROVIDER` | `openai` | no | Shared fallback provider for LLM-powered features |
 | `DEFAULT_LLM_BASE_URL` | — | no | Shared fallback base URL for OpenAI-compatible LLM endpoints |
 | `DEFAULT_LLM_API_KEY` | — | no | Shared fallback API key for LLM-powered features; omit for Ollama |
@@ -60,6 +61,9 @@ cp .env.example .env
 | `CONTEXTUAL_LLM_*` | — | no | Optional overrides used by contextual embeddings |
 | `AGENTIC_LLM_*` | — | no | Preferred shared override bucket used by LLM-based filtering/extraction helpers and agentic-style features |
 | `RERANK_LLM_*` | see `.env.example` | no | Overrides for reranking; may target a local cross-encoder or an OpenAI-compatible scorer |
+| `KG_LLM_BASE_URL` | — | no | Base URL for the knowledge-graph extraction LLM; falls back to `DEFAULT_LLM_BASE_URL` |
+| `KG_LLM_API_KEY` | — | no | API key for the KG extraction LLM; falls back to `DEFAULT_LLM_API_KEY` |
+| `KG_LLM_MODEL_NAME` | — | no | Model for KG extraction; falls back to `DEFAULT_LLM_MODEL_NAME` |
 | `TRANSPORT` | `sse` | no | MCP transport: `sse` or `stdio` |
 | `HOST` | `0.0.0.0` | no | Bind address for the SSE server |
 | `PORT` | `8051` | no | Port for the SSE server |
@@ -227,8 +231,8 @@ EMBEDDING_DIM=1536
 ## Chunking
 
 ```env
-CHUNK_STRATEGY=paragraph   # paragraph | fixed
-CHUNK_SIZE=1000             # tokens per chunk (target for paragraph; exact for fixed)
+CHUNK_STRATEGY=paragraph   # paragraph | sentence | fixed | heading
+CHUNK_SIZE=1000             # tokens per chunk (target for paragraph/heading; exact for fixed)
 CHUNK_OVERLAP=200           # overlap tokens between consecutive chunks
 BATCH_SIZE=50               # chunks embedded per batch (tune for memory / throughput)
 ```
@@ -236,7 +240,14 @@ BATCH_SIZE=50               # chunks embedded per batch (tune for memory / throu
 **Strategies:**
 
 - `paragraph` — splits on paragraph boundaries; `CHUNK_SIZE` is a soft target. Recommended for most content.
+- `sentence` — splits on sentence boundaries.
 - `fixed` — hard token splits at exactly `CHUNK_SIZE` with `CHUNK_OVERLAP` overlap. Use for content without clear paragraph structure.
+- `heading` — splits at H1–H6 markdown section boundaries. Each chunk covers exactly one section (sub-chunked by paragraph if the section exceeds `CHUNK_SIZE`). Stores a `heading_path` array (e.g. `["Guide", "Installation", "Python"]`) and `heading_level` integer in chunk metadata. The heading path is prepended to the embedding text for richer semantic matching while the raw section content is stored in the database. Recommended for structured documentation.
+
+  The `search_documents` tool accepts a `heading_path_prefix` filter when this strategy is in use:
+  ```json
+  { "query": "authentication", "heading_path_prefix": ["API Reference"] }
+  ```
 
 Per-request overrides of `chunk_strategy` are accepted by crawl and index tools when the value is in the server allowlist.
 
@@ -268,6 +279,7 @@ USE_CONTEXTUAL_EMBEDDINGS=false
 USE_HYBRID_SEARCH=false
 USE_AGENTIC_RAG=false
 USE_RERANKING=false
+USE_GRAPH_INDEX=false
 ```
 
 | Flag | Effect when `true` |
@@ -276,6 +288,7 @@ USE_RERANKING=false
 | `USE_HYBRID_SEARCH` | Vector similarity search is combined with full-text (tsvector/BM25) search. Improves recall for keyword-heavy queries. The `fts` column is generated automatically; no extra setup required. |
 | `USE_AGENTIC_RAG` | Registers the feature-flagged MCP tool `search_code_examples`. Off by default to avoid exposing an extra retrieval surface unintentionally. |
 | `USE_RERANKING` | Applies a cross-encoder re-ranking pass to returned results. Improves precision. Requires a compatible re-ranker model to be available (currently uses the embedding provider). |
+| `USE_GRAPH_INDEX` | Extracts a knowledge graph (entities + relationships) from each ingested document via an LLM call. Stores entities in `graph_nodes` with vector embeddings and relationships in `graph_edges`. Registers the `search_knowledge_graph` MCP tool. Requires `KG_LLM_MODEL_NAME` or `DEFAULT_LLM_MODEL_NAME`. LLM extraction errors are logged but never block ingestion. |
 
 ---
 
@@ -287,6 +300,7 @@ LLM-powered features use a shared fallback plus optional per-feature overrides.
 - `CONTEXTUAL_LLM_*` overrides are used by contextual embeddings.
 - `AGENTIC_LLM_*` is the preferred shared override bucket currently used by LLM-based content filtering and extraction helpers, and is also available to agentic-style features.
 - `RERANK_LLM_*` overrides are used only by reranking.
+- `KG_LLM_*` overrides are used only by knowledge-graph extraction (`USE_GRAPH_INDEX=true`).
 
 There is no separate `HYBRID_LLM_*` setting family; hybrid retrieval is vector search + PostgreSQL full-text search.
 
@@ -333,6 +347,19 @@ When `RERANK_LLM_BASE_URL` is unset, `RERANK_LLM_MODEL_NAME` is treated as a loc
 USE_RERANKING=true
 RERANK_LLM_MODEL_NAME=cross-encoder/ms-marco-MiniLM-L-6-v2
 ```
+
+### Knowledge-graph extraction override example
+
+Required only when `USE_GRAPH_INDEX=true` and you do not want the KG extractor to share `DEFAULT_LLM_*`.
+
+```env
+USE_GRAPH_INDEX=true
+KG_LLM_BASE_URL=https://api.openai.com/v1
+KG_LLM_API_KEY=sk-...
+KG_LLM_MODEL_NAME=gpt-4o-mini
+```
+
+The extractor sends the full document markdown to the LLM and parses a JSON response containing entities (name, type, description) and directed relationships (source → relationship → target). Extraction runs once per document per ingestion. Failures are logged and silently skipped — they never block the normal chunk/embed pipeline.
 
 `*_BASE_URL` accepts any OpenAI-compatible API endpoint, including:
 

@@ -24,6 +24,31 @@ from sqlmodel import text
 from src.config import settings
 from src.models import get_session
 
+# ---------------------------------------------------------------------------
+# Monkey-patch: auto-initialize MCP sessions for clients that skip the
+# initialize handshake (e.g. agents that send tool calls immediately after
+# the SSE connection without first completing the MCP init sequence).
+# ---------------------------------------------------------------------------
+from mcp.server.session import InitializationState, ServerSession  # noqa: E402
+import mcp.types as _mcp_types  # noqa: E402
+
+_orig_received_request = ServerSession._received_request
+
+
+async def _auto_init_received_request(self: "ServerSession", responder) -> None:  # type: ignore[type-arg]
+    if (
+        self._initialization_state != InitializationState.Initialized
+        and not isinstance(responder.request.root, _mcp_types.InitializeRequest)
+        and not isinstance(responder.request.root, _mcp_types.PingRequest)
+    ):
+        # Client skipped the initialize handshake — silently promote state.
+        self._initialization_state = InitializationState.Initialized
+    await _orig_received_request(self, responder)
+
+
+ServerSession._received_request = _auto_init_received_request
+# ---------------------------------------------------------------------------
+
 # Load .env from project root before any settings are imported
 project_root = Path(__file__).resolve().parent.parent
 load_dotenv(project_root / ".env", override=True)
@@ -236,6 +261,9 @@ mcp.tool()(tool_definitions.get_markdown_by_url)
 
 if settings.USE_AGENTIC_RAG:
     mcp.tool()(tool_definitions.search_code_examples)
+
+if settings.USE_GRAPH_INDEX:
+    mcp.tool()(tool_definitions.search_knowledge_graph)
 
 # Freshness/eviction maintenance remains scheduler-driven and is intentionally
 # not exposed as MCP admin/ops endpoints.

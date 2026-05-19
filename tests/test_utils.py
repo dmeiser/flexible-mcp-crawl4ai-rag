@@ -37,7 +37,12 @@ from src.services.document_storage_service import (
 from src.services.reranking_service import parse_rerank_scores, rerank_json_payload, rerank_results, rerank_score_values
 from src.services.retrieval import code_example_row_to_result, merge_vector_and_fts_rows, query_code_example_rows
 from src.services.scoring_service import compute_staleness_score, compute_value_score
-from src.services.search_service import _python_side_vector_search, search_code_examples, search_documents
+from src.services.search_service import (
+    _python_side_vector_search,
+    search_code_examples,
+    search_documents,
+    search_knowledge_graph,
+)
 from src.services.tombstone_service import _extract_record_source, get_db_size_bytes, tombstone_records
 from src.utils import (
     _create_openai_embedding,
@@ -356,6 +361,41 @@ class TestSettingsValidation:
         )
         assert override.effective_contextual_max_retries == 2
         assert override.effective_contextual_retry_delay_seconds == pytest.approx(0.05)
+
+    def test_kg_effective_falls_back_to_default(self):
+        s = Settings(
+            POSTGRES_URL="postgresql://u:p@h/db",
+            EMBEDDING_BASE_URL="http://localhost:11434/api/embeddings",
+            EMBEDDING_MODEL_NAME="m",
+            DEFAULT_LLM_API_KEY="default-key",
+            DEFAULT_LLM_BASE_URL="http://default-llm",
+            DEFAULT_LLM_MODEL_NAME="default-model",
+        )
+        assert s.effective_kg_api_key == "default-key"
+        assert s.effective_kg_base_url == "http://default-llm"
+        assert s.effective_kg_model_name == "default-model"
+
+    def test_kg_override_takes_priority(self):
+        s = Settings(
+            POSTGRES_URL="postgresql://u:p@h/db",
+            EMBEDDING_BASE_URL="http://localhost:11434/api/embeddings",
+            EMBEDDING_MODEL_NAME="m",
+            DEFAULT_LLM_MODEL_NAME="default-model",
+            KG_LLM_API_KEY="kg-key",
+            KG_LLM_BASE_URL="http://kg-llm",
+            KG_LLM_MODEL_NAME="kg-model",
+        )
+        assert s.effective_kg_api_key == "kg-key"
+        assert s.effective_kg_base_url == "http://kg-llm"
+        assert s.effective_kg_model_name == "kg-model"
+
+    def test_use_graph_index_defaults_false(self):
+        s = Settings(
+            POSTGRES_URL="postgresql://u:p@h/db",
+            EMBEDDING_BASE_URL="http://localhost:11434/api/embeddings",
+            EMBEDDING_MODEL_NAME="m",
+        )
+        assert s.USE_GRAPH_INDEX is False
 
 
 class TestChatCompletionRetryHelpers:
@@ -1033,6 +1073,34 @@ class TestAddDocumentsToDb:
         assert row.content_class == "text"
         assert row.is_active is True
         assert isinstance(row.content_hash, str)
+
+    @pytest.mark.asyncio
+    async def test_embed_texts_override_used_for_embedding(self):
+        """When embed_texts is passed, those texts are used for embedding instead of content."""
+        session = MagicMock()
+        session.exec.return_value.all.return_value = []
+        captured_embed_batches: list = []
+
+        async def mock_batch(texts):
+            captured_embed_batches.append(texts)
+            return [EMBED_A] * len(texts)
+
+        with (
+            patch("src.utils.create_embeddings_batch", side_effect=mock_batch),
+            patch("src.services.document_storage_service.upsert_source", return_value=1),
+            patch("src.utils.settings", _fake_settings(USE_CONTEXTUAL_EMBEDDINGS=False, DEFAULT_LLM_MODEL_NAME=None)),
+        ):
+            result = await add_documents_to_db(
+                session,
+                ["https://x.com/page"],
+                ["raw content"],
+                [{"source": "x.com"}],
+                [0],
+                embed_texts=["[Section] raw content"],
+            )
+
+        assert result == 1
+        assert captured_embed_batches[0] == ["[Section] raw content"]
 
 
 # ---------------------------------------------------------------------------
@@ -2270,3 +2338,27 @@ class TestCodeExampleRowToResult:
         assert result["content"] == "code here"
         assert result["similarity_score"] == 0.95
         assert result["metadata"] == {"k": "v"}
+
+
+class TestSearchServiceKnowledgeGraph:
+    """Covers search_service.search_knowledge_graph wrapper (line 72)."""
+
+    @pytest.mark.asyncio
+    async def test_delegates_to_graph_retrieval(self):
+        mock_result = [{"entity_name": "FastMCP", "url": "https://x.com"}]
+        session = MagicMock()
+        patch_path = "src.services.search_service._graph_retrieval.search_knowledge_graph"
+        with patch(patch_path, new=AsyncMock(return_value=mock_result)) as mock_fn:
+            result = await search_knowledge_graph(
+                session, "test query", match_count=3, depth=1, entity_type_filter="TOOL"
+            )
+            mock_fn.assert_awaited_once()
+            call_kwargs = mock_fn.call_args
+            assert call_kwargs.kwargs["query"] == "test query"
+            assert call_kwargs.kwargs["match_count"] == 3
+            assert call_kwargs.kwargs["depth"] == 1
+            assert call_kwargs.kwargs["entity_type_filter"] == "TOOL"
+        assert result == mock_result
+
+
+# ---------------------------------------------------------------------------

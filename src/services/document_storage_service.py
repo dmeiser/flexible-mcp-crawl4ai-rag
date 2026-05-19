@@ -244,6 +244,23 @@ def _delete_existing_crawled_pages(
     return first_seen_map
 
 
+async def _contextual_embed_texts(
+    contents: Sequence[str],
+    full_docs: Sequence[Optional[str]],
+) -> List[str]:
+    """Generate contextually enriched embed texts by calling the LLM for each chunk."""
+    enriched = await asyncio.gather(
+        *[_utils.generate_contextual_text(fd or "", c) for c, fd in zip(contents, full_docs)]
+    )
+    return [entry[0] for entry in enriched]
+
+
+def _filter_valid_embed_texts(embed_texts: List[str], contents: Sequence[str]) -> List[str]:
+    """Filter *embed_texts* to only those whose corresponding content is non-empty."""
+    valid_mask = [bool(c and c.strip()) for c in contents]
+    return [embed_texts[i] for i, ok in enumerate(valid_mask) if ok]
+
+
 async def add_documents_to_db(
     session: Session,
     urls: List[str],
@@ -251,6 +268,7 @@ async def add_documents_to_db(
     metadatas: List[Dict[str, Any]],
     chunk_numbers: List[int],
     full_documents: Optional[List[str]] = None,
+    embed_texts: Optional[List[str]] = None,
 ) -> int:
     """
     Embed and store a batch of text chunks into crawled_pages.
@@ -263,12 +281,15 @@ async def add_documents_to_db(
 
     v_urls, v_contents, v_metas, v_chunks, v_fulldocs = valid
 
+    v_embed_texts = _filter_valid_embed_texts(embed_texts, contents) if embed_texts is not None else None
+
     first_seen_map = _delete_existing_crawled_pages(session, list(v_urls))
 
-    embed_texts = await _embedding_texts_for_documents(v_contents, v_fulldocs, full_documents)
+    final_embed_texts = await _embedding_texts_for_documents(v_contents, v_fulldocs, full_documents, v_embed_texts)
     return await _insert_document_batches(
         session=session,
-        embed_texts=embed_texts,
+        embed_texts=final_embed_texts,
+        storage_contents=list(v_contents),
         urls=v_urls,
         metadatas=v_metas,
         chunk_numbers=v_chunks,
@@ -299,13 +320,13 @@ async def _embedding_texts_for_documents(
     contents: Sequence[str],
     full_docs: Sequence[Optional[str]],
     full_documents: Optional[List[str]],
+    embed_overrides: Optional[List[str]] = None,
 ) -> List[str]:
+    if embed_overrides is not None:
+        return embed_overrides
     if not _should_enrich_with_context(full_documents):
         return list(contents)
-    enriched = await asyncio.gather(
-        *[_utils.generate_contextual_text(fd or "", c) for c, fd in zip(contents, full_docs)]
-    )
-    return [entry[0] for entry in enriched]
+    return await _contextual_embed_texts(contents, full_docs)
 
 
 def _should_enrich_with_context(full_documents: Optional[List[str]]) -> bool:
@@ -317,6 +338,7 @@ def _should_enrich_with_context(full_documents: Optional[List[str]]) -> bool:
 async def _insert_document_batches(
     session: Session,
     embed_texts: List[str],
+    storage_contents: List[str],
     urls: Sequence[str],
     metadatas: Sequence[Dict[str, Any]],
     chunk_numbers: Sequence[int],
@@ -329,6 +351,7 @@ async def _insert_document_batches(
         total_added += await _insert_single_document_batch(
             session,
             embed_texts,
+            storage_contents,
             urls,
             metadatas,
             chunk_numbers,
@@ -343,6 +366,7 @@ async def _insert_document_batches(
 async def _insert_single_document_batch(
     session: Session,
     embed_texts: Sequence[str],
+    storage_contents: Sequence[str],
     urls: Sequence[str],
     metadatas: Sequence[Dict[str, Any]],
     chunk_numbers: Sequence[int],
@@ -353,13 +377,16 @@ async def _insert_single_document_batch(
 ) -> int:
     batch_end = batch_start + batch_size
     b_texts = list(embed_texts[batch_start:batch_end])
+    b_contents = list(storage_contents[batch_start:batch_end])
     b_urls = list(urls[batch_start:batch_end])
     b_metas = list(metadatas[batch_start:batch_end])
     b_chunks = list(chunk_numbers[batch_start:batch_end])
     embeddings = await _safe_batch_embeddings(b_texts)
     if embeddings is None:
         return 0
-    rows = _build_crawled_rows_batch(session, b_urls, b_chunks, b_texts, b_metas, embeddings, first_seen_map, now_utc)
+    rows = _build_crawled_rows_batch(
+        session, b_urls, b_chunks, b_contents, b_metas, embeddings, first_seen_map, now_utc
+    )
     return _commit_rows(session, rows)
 
 

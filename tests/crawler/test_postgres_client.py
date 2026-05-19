@@ -53,9 +53,9 @@ class TestStoreCrawledDocuments:
 
         with (
             patch(
-                "src.services.ingestion.chunk_text_according_to_settings",
+                "src.services.ingestion.chunk_text_with_heading_metadata",
                 new_callable=AsyncMock,
-                return_value=["# Title\n\nSome content."],
+                return_value=[("# Title\n\nSome content.", {"heading_path": [], "heading_level": 0})],
             ) as mock_chunk,
             patch("src.services.ingestion.add_documents_to_db", new_callable=AsyncMock, return_value=1) as mock_add,
         ):
@@ -76,10 +76,10 @@ class TestStoreCrawledDocuments:
         ]
 
         async def fake_chunk(text):
-            return [p for p in text.split("\n\n") if p.strip()]
+            return [(p, {"heading_path": [], "heading_level": 0}) for p in text.split("\n\n") if p.strip()]
 
         with (
-            patch("src.services.ingestion.chunk_text_according_to_settings", side_effect=fake_chunk),
+            patch("src.services.ingestion.chunk_text_with_heading_metadata", side_effect=fake_chunk),
             patch("src.services.ingestion.add_documents_to_db", new_callable=AsyncMock, return_value=3) as mock_add,
         ):
             pages, chunks = await store_crawled_documents(session, crawl_results, "sitemap")
@@ -101,14 +101,14 @@ class TestStoreCrawledDocuments:
         captured_metas: list = []
 
         async def fake_chunk(text):
-            return [text]
+            return [(text, {"heading_path": [], "heading_level": 0})]
 
-        async def capture_add(sess, urls, contents, metas, chunk_nums, full_docs):
+        async def capture_add(sess, urls, contents, metas, chunk_nums, full_docs, embed_texts=None):
             captured_metas.extend(metas)
             return 1
 
         with (
-            patch("src.services.ingestion.chunk_text_according_to_settings", side_effect=fake_chunk),
+            patch("src.services.ingestion.chunk_text_with_heading_metadata", side_effect=fake_chunk),
             patch("src.services.ingestion.add_documents_to_db", side_effect=capture_add),
         ):
             await store_crawled_documents(session, crawl_results, "webpage_single")
@@ -124,6 +124,8 @@ class TestStoreCrawledDocuments:
         assert meta["content_class"] == "text"
         assert meta["is_active"] is True
         assert isinstance(meta["content_hash"], str) and len(meta["content_hash"]) == 64
+        assert "heading_path" in meta
+        assert "heading_level" in meta
 
     @pytest.mark.asyncio
     async def test_reference_metadata_preserved(self):
@@ -143,14 +145,14 @@ class TestStoreCrawledDocuments:
         captured_metas: list = []
 
         async def fake_chunk(text):
-            return [text]
+            return [(text, {"heading_path": [], "heading_level": 0})]
 
-        async def capture_add(sess, urls, contents, metas, chunk_nums, full_docs):
+        async def capture_add(sess, urls, contents, metas, chunk_nums, full_docs, embed_texts=None):
             captured_metas.extend(metas)
             return 1
 
         with (
-            patch("src.services.ingestion.chunk_text_according_to_settings", side_effect=fake_chunk),
+            patch("src.services.ingestion.chunk_text_with_heading_metadata", side_effect=fake_chunk),
             patch("src.services.ingestion.add_documents_to_db", side_effect=capture_add),
         ):
             await store_crawled_documents(session, crawl_results, "webpage_single")
@@ -180,10 +182,10 @@ class TestStoreCrawledDocuments:
         ]
 
         async def fake_chunk(text):
-            return [text]
+            return [(text, {"heading_path": [], "heading_level": 0})]
 
         with (
-            patch("src.services.ingestion.chunk_text_according_to_settings", side_effect=fake_chunk),
+            patch("src.services.ingestion.chunk_text_with_heading_metadata", side_effect=fake_chunk),
             patch("src.services.ingestion.add_documents_to_db", new_callable=AsyncMock, return_value=1),
         ):
             pages, chunks = await store_crawled_documents(session, crawl_results, "sitemap")
@@ -209,14 +211,14 @@ class TestStoreCrawledDocuments:
         captured_metas: list = []
 
         async def fake_chunk(text):
-            return [text]
+            return [(text, {"heading_path": [], "heading_level": 0})]
 
-        async def capture_add(sess, urls, contents, metas, chunk_nums, full_docs):
+        async def capture_add(sess, urls, contents, metas, chunk_nums, full_docs, embed_texts=None):
             captured_metas.extend(metas)
             return 1
 
         with (
-            patch("src.services.ingestion.chunk_text_according_to_settings", side_effect=fake_chunk),
+            patch("src.services.ingestion.chunk_text_with_heading_metadata", side_effect=fake_chunk),
             patch("src.services.ingestion.add_documents_to_db", side_effect=capture_add),
         ):
             pages, chunks = await store_crawled_documents(session, crawl_results, "webpage")
@@ -228,3 +230,184 @@ class TestStoreCrawledDocuments:
         assert captured_metas[0]["media_metadata"]["image_count"] == 0
         assert captured_metas[0]["session_id"] == "session-123"
         assert captured_metas[0]["run_id"] == "run-xyz"
+
+    @pytest.mark.asyncio
+    async def test_heading_path_metadata_populated(self):
+        """Heading path metadata is stored when chunking produces heading info."""
+        session = MagicMock()
+        crawl_results = [{"url": "https://example.com/doc", "markdown": "# Guide\nContent."}]
+        captured_metas: list = []
+
+        async def fake_chunk(text):
+            return [("Content.", {"heading_path": ["Guide"], "heading_level": 1})]
+
+        async def capture_add(sess, urls, contents, metas, chunk_nums, full_docs, embed_texts=None):
+            captured_metas.extend(metas)
+            return 1
+
+        with (
+            patch("src.services.ingestion.chunk_text_with_heading_metadata", side_effect=fake_chunk),
+            patch("src.services.ingestion.add_documents_to_db", side_effect=capture_add),
+        ):
+            await store_crawled_documents(session, crawl_results, "webpage")
+
+        assert captured_metas[0]["heading_path"] == ["Guide"]
+        assert captured_metas[0]["heading_level"] == 1
+
+    @pytest.mark.asyncio
+    async def test_embed_text_includes_heading_prefix(self):
+        """embed_texts passed to add_documents_to_db include heading prefix when path is set."""
+        session = MagicMock()
+        crawl_results = [{"url": "https://example.com/doc", "markdown": "# Guide\nContent."}]
+        captured_embed_texts: list = []
+
+        async def fake_chunk(text):
+            return [("Content.", {"heading_path": ["Guide"], "heading_level": 1})]
+
+        async def capture_add(sess, urls, contents, metas, chunk_nums, full_docs, embed_texts=None):
+            if embed_texts:
+                captured_embed_texts.extend(embed_texts)
+            return 1
+
+        with (
+            patch("src.services.ingestion.chunk_text_with_heading_metadata", side_effect=fake_chunk),
+            patch("src.services.ingestion.add_documents_to_db", side_effect=capture_add),
+        ):
+            await store_crawled_documents(session, crawl_results, "webpage")
+
+        assert len(captured_embed_texts) == 1
+        assert "[Guide]" in captured_embed_texts[0]
+        assert "Content." in captured_embed_texts[0]
+
+    @pytest.mark.asyncio
+    async def test_embed_text_no_heading_is_plain_chunk(self):
+        """embed_texts is the plain chunk text when no heading path."""
+        session = MagicMock()
+        crawl_results = [{"url": "https://example.com/plain", "markdown": "Plain text."}]
+        captured_embed_texts: list = []
+
+        async def fake_chunk(text):
+            return [("Plain text.", {"heading_path": [], "heading_level": 0})]
+
+        async def capture_add(sess, urls, contents, metas, chunk_nums, full_docs, embed_texts=None):
+            if embed_texts:
+                captured_embed_texts.extend(embed_texts)
+            return 1
+
+        with (
+            patch("src.services.ingestion.chunk_text_with_heading_metadata", side_effect=fake_chunk),
+            patch("src.services.ingestion.add_documents_to_db", side_effect=capture_add),
+        ):
+            await store_crawled_documents(session, crawl_results, "webpage")
+
+        assert captured_embed_texts == ["Plain text."]
+
+
+# ---------------------------------------------------------------------------
+# Tests: index_knowledge_graphs
+# ---------------------------------------------------------------------------
+
+
+class TestIndexKnowledgeGraphs:
+    @pytest.mark.asyncio
+    async def test_no_op_when_graph_index_disabled(self):
+        """Returns immediately when USE_GRAPH_INDEX is False."""
+        from src.services.ingestion import index_knowledge_graphs
+
+        session = MagicMock()
+        mock_settings = MagicMock()
+        mock_settings.USE_GRAPH_INDEX = False
+
+        with patch("src.config.settings", mock_settings):
+            await index_knowledge_graphs(session, ["https://x.com"], ["content"], MagicMock())
+
+        session.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_op_when_no_model_name(self):
+        """Returns immediately when no KG model name is configured."""
+        from src.services.ingestion import index_knowledge_graphs
+
+        session = MagicMock()
+        mock_settings = MagicMock()
+        mock_settings.USE_GRAPH_INDEX = True
+        mock_settings.effective_kg_model_name = None
+
+        with patch("src.config.settings", mock_settings):
+            await index_knowledge_graphs(session, ["https://x.com"], ["content"], MagicMock())
+
+        session.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_op_when_no_endpoint_factory(self):
+        """Returns immediately when endpoint_factory is None."""
+        from src.services.ingestion import index_knowledge_graphs
+
+        session = MagicMock()
+        mock_settings = MagicMock()
+        mock_settings.USE_GRAPH_INDEX = True
+        mock_settings.effective_kg_model_name = "some-model"
+
+        with patch("src.config.settings", mock_settings):
+            await index_knowledge_graphs(session, ["https://x.com"], ["content"], None)
+
+        session.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_extracts_and_stores_kg(self):
+        """When enabled, extracts KG and stores it for each URL."""
+        from src.services.ingestion import index_knowledge_graphs
+
+        session = MagicMock()
+        mock_settings = MagicMock()
+        mock_settings.USE_GRAPH_INDEX = True
+        mock_settings.effective_kg_model_name = "some-model"
+        endpoint_factory = MagicMock()
+
+        kg_data = {
+            "entities": [{"entity_name": "Python", "entity_type": "language", "description": "a language"}],
+            "relationships": [],
+        }
+
+        mock_extractor = MagicMock()
+        mock_extractor.extract_knowledge_graph = AsyncMock(return_value=kg_data)
+
+        with (
+            patch("src.config.settings", mock_settings),
+            patch(
+                "src.services.kg_extraction_service.KnowledgeGraphExtractionService",
+                return_value=mock_extractor,
+            ),
+            patch("src.services.graph_storage_service.store_knowledge_graph", new_callable=AsyncMock) as mock_store,
+            patch("src.utils.create_embedding", new_callable=AsyncMock, return_value=[0.1, 0.2]),
+        ):
+            await index_knowledge_graphs(session, ["https://x.com/page"], ["page content"], endpoint_factory)
+
+        mock_extractor.extract_knowledge_graph.assert_called_once()
+        mock_store.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_default_factory_creates_adapter_when_no_endpoint_factory(self):
+        """_default_factory (ingestion.py line 254) runs when endpoint_factory=None."""
+        from src.services.ingestion import index_knowledge_graphs
+
+        session = MagicMock()
+        mock_settings = MagicMock()
+        mock_settings.USE_GRAPH_INDEX = True
+        mock_settings.effective_kg_model_name = "some-model"
+        mock_settings.effective_kg_api_key = "key"
+        mock_settings.effective_kg_base_url = "http://llm"
+
+        mock_client = MagicMock()
+        mock_adapter = MagicMock()
+        mock_adapter.chat_completion = AsyncMock(side_effect=RuntimeError("no network in tests"))
+
+        with (
+            patch("src.config.settings", mock_settings),
+            patch("openai.AsyncOpenAI", return_value=mock_client),
+            patch("src.services.kg_extraction_service.OpenAIEndpointAdapter", return_value=mock_adapter),
+            patch("src.services.graph_storage_service.store_knowledge_graph", new_callable=AsyncMock),
+            patch("src.utils.create_embedding", new_callable=AsyncMock, return_value=[0.1]),
+        ):
+            # endpoint_factory=None → _default_factory is used → line 254 is reached
+            await index_knowledge_graphs(session, ["https://x.com"], ["content"], None)

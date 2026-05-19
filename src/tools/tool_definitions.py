@@ -47,7 +47,7 @@ from src.services.document_storage_service import (
     add_code_examples_to_db,
     add_documents_to_db,
 )
-from src.services.ingestion import store_crawled_documents
+from src.services.ingestion import store_crawled_documents, index_knowledge_graphs
 from src.services.metadata_extractor import (
     extract_link_graph,
     extract_media_metadata,
@@ -57,10 +57,11 @@ from src.services.reranking_service import rerank_results
 from src.services.scoring_service import compute_staleness_score, compute_value_score
 from src.services.search_service import search_code_examples as _search_code_examples
 from src.services.search_service import search_documents
+from src.services.search_service import search_knowledge_graph as _search_knowledge_graph
 from src.services.tombstone_service import get_db_size_bytes, tombstone_records
 from src.services.url_scorers import build_url_scorer, get_supported_scorer_types
 from src.services.web_crawler import (
-    chunk_text_according_to_settings,
+    chunk_text_with_heading_metadata,
     crawl_recursive_internal_links,
 )
 from src.utils import create_embedding
@@ -2073,6 +2074,8 @@ def _doc_index_metadata(
     doc_media_metadata: Dict[str, Any],
     extraction_strategy: Optional[str],
     reference_meta: Dict[str, Any],
+    heading_path: Optional[List[str]] = None,
+    heading_level: int = 0,
 ) -> Dict[str, Any]:
     now_iso = datetime.now(timezone.utc).isoformat()
     meta = extract_section_info(chunk)
@@ -2098,6 +2101,8 @@ def _doc_index_metadata(
             "index_variants_override": resolved_override,
             "link_graph": doc_link_graph,
             "media_metadata": doc_media_metadata,
+            "heading_path": heading_path or [],
+            "heading_level": heading_level,
         }
     )
     meta.update(reference_meta)
@@ -2122,17 +2127,22 @@ async def _variant_index_payload(
     doc_link_graph: Dict[str, Any],
     doc_media_metadata: Dict[str, Any],
     reference_meta: Dict[str, Any],
-) -> tuple[List[str], List[int], List[str], List[Dict[str, Any]], List[str]]:
+) -> tuple[List[str], List[int], List[str], List[Dict[str, Any]], List[str], List[str]]:
     db_urls: List[str] = []
     db_chunks: List[int] = []
     db_contents: List[str] = []
     db_metas: List[Dict[str, Any]] = []
     db_fulldocs: List[str] = []
-    chunks = await chunk_text_according_to_settings(selected_variant_markdown)
-    for chunk_index, chunk in enumerate(chunks):
+    db_embed_texts: List[str] = []
+    chunk_tuples = await chunk_text_with_heading_metadata(selected_variant_markdown)
+    for chunk_index, (chunk, heading_meta) in enumerate(chunk_tuples):
+        heading_path: List[str] = heading_meta.get("heading_path", [])
+        heading_level: int = heading_meta.get("heading_level", 0)
+        embed_text = f"[{' > '.join(heading_path)}]\n\n{chunk}" if heading_path else chunk
         db_urls.append(doc["url"])
         db_chunks.append(chunk_index)
         db_contents.append(chunk)
+        db_embed_texts.append(embed_text)
         db_metas.append(
             _doc_index_metadata(
                 doc=doc,
@@ -2150,10 +2160,12 @@ async def _variant_index_payload(
                 doc_media_metadata=doc_media_metadata,
                 extraction_strategy=extraction_strategy,
                 reference_meta=reference_meta,
+                heading_path=heading_path,
+                heading_level=heading_level,
             )
         )
         db_fulldocs.append(selected_variant_markdown)
-    return db_urls, db_chunks, db_contents, db_metas, db_fulldocs
+    return db_urls, db_chunks, db_contents, db_metas, db_fulldocs, db_embed_texts
 
 
 async def _collect_index_payload_for_doc(
@@ -2166,12 +2178,13 @@ async def _collect_index_payload_for_doc(
     follow_links: bool,
     effective_run_id: str,
     resolved_override: Optional[str],
-) -> tuple[List[str], List[int], List[str], List[Dict[str, Any]], List[str], set[str], List[str]]:
+) -> tuple[List[str], List[int], List[str], List[Dict[str, Any]], List[str], set[str], List[str], List[str]]:
     db_urls: List[str] = []
     db_chunks: List[int] = []
     db_contents: List[str] = []
     db_metas: List[Dict[str, Any]] = []
     db_fulldocs: List[str] = []
+    db_embed_texts: List[str] = []
     indexed_variant_keys: set[str] = set()
 
     variant_values: Dict[str, str] = doc.get("variant_values", {})
@@ -2210,20 +2223,35 @@ async def _collect_index_payload_for_doc(
         db_contents.extend(variant_payload[2])
         db_metas.extend(variant_payload[3])
         db_fulldocs.extend(variant_payload[4])
+        db_embed_texts.extend(variant_payload[5])
 
-    return db_urls, db_chunks, db_contents, db_metas, db_fulldocs, indexed_variant_keys, doc_fallback_notes
+    return (
+        db_urls,
+        db_chunks,
+        db_contents,
+        db_metas,
+        db_fulldocs,
+        indexed_variant_keys,
+        doc_fallback_notes,
+        db_embed_texts,
+    )
 
 
 def _extend_index_payload(
     payload: Dict[str, Any],
-    doc_payload: tuple[List[str], List[int], List[str], List[Dict[str, Any]], List[str], set[str], List[str]],
+    doc_payload: tuple[
+        List[str], List[int], List[str], List[Dict[str, Any]], List[str], set[str], List[str], List[str]
+    ],
 ) -> None:
-    db_urls, db_chunks, db_contents, db_metas, db_fulldocs, indexed_variants, fallback_notes = doc_payload
+    db_urls, db_chunks, db_contents, db_metas, db_fulldocs, indexed_variants, fallback_notes, db_embed_texts = (
+        doc_payload
+    )
     payload["db_urls"].extend(db_urls)
     payload["db_chunks"].extend(db_chunks)
     payload["db_contents"].extend(db_contents)
     payload["db_metas"].extend(db_metas)
     payload["db_fulldocs"].extend(db_fulldocs)
+    payload["db_embed_texts"].extend(db_embed_texts)
     payload["indexed_variant_keys"].update(indexed_variants)
     payload["fallback_notes"].extend(fallback_notes)
 
@@ -2253,6 +2281,7 @@ async def _index_crawled_docs(
         "db_contents": [],
         "db_metas": [],
         "db_fulldocs": [],
+        "db_embed_texts": [],
         "indexed_variant_keys": set(),
         "fallback_notes": [],
     }
@@ -2278,7 +2307,9 @@ async def _index_crawled_docs(
                 payload["db_metas"],
                 payload["db_chunks"],
                 payload["db_fulldocs"],
+                embed_texts=payload["db_embed_texts"],
             )
+            await index_knowledge_graphs(session, payload["db_urls"], payload["db_contents"])
         pages_indexed = len(set(payload["db_urls"]))
     indexed_variant_keys = cast(set[str], payload["indexed_variant_keys"])
     fallback_notes = cast(List[str], payload["fallback_notes"])
@@ -2707,7 +2738,7 @@ async def crawl_to_markdown(
     url: str,
     markdown_variant: str = "raw",
     run_config: Optional[Dict[str, Any]] = None,
-    index_result: bool = False,
+    index_result: bool = True,
     index_variants: Optional[str] = None,
     extraction_strategy: Optional[str] = None,
     extraction_schema: Optional[Dict[str, Any]] = None,
@@ -3013,7 +3044,7 @@ async def crawl_local_file(
     file_path: str,
     markdown_variant: str = "raw",
     run_config: Optional[Dict[str, Any]] = None,
-    index_result: bool = False,
+    index_result: bool = True,
 ) -> str:
     """Crawl local HTML/markdown content via file:// and return markdown variants."""
     try:
@@ -3039,7 +3070,7 @@ async def crawl_raw_html(
     html: str,
     markdown_variant: str = "raw",
     run_config: Optional[Dict[str, Any]] = None,
-    index_result: bool = False,
+    index_result: bool = True,
 ) -> str:
     """Crawl raw HTML content using Crawl4AI's raw: URL mode."""
     try:
@@ -3408,7 +3439,7 @@ async def crawl_url(
     mode: str = "markdown",
     markdown_variant: str = "raw",
     run_config: Optional[Dict[str, Any]] = None,
-    index_result: bool = False,
+    index_result: bool = True,
     index_variants: Optional[str] = None,
     extraction_strategy: Optional[str] = None,
     extraction_schema: Optional[Dict[str, Any]] = None,
@@ -4248,7 +4279,7 @@ async def crawl_with_session(
     session_id: str = "default-session",
     action: str = "reuse",
     markdown_variant: str = "raw",
-    index_result: bool = False,
+    index_result: bool = True,
     run_config: Optional[Dict[str, Any]] = None,
     run_id: Optional[str] = None,
 ) -> str:
@@ -4433,7 +4464,7 @@ async def crawl_with_auth_hooks(
     url: str,
     session_id: str,
     markdown_variant: str = "raw",
-    index_result: bool = False,
+    index_result: bool = True,
     run_config: Optional[Dict[str, Any]] = None,
     custom_headers: Optional[Dict[str, str]] = None,
     cookies: Optional[List[Dict[str, Any]]] = None,
@@ -4480,7 +4511,7 @@ async def crawl_login_required(
     session_id: str,
     login_script: Optional[str] = None,
     markdown_variant: str = "raw",
-    index_result: bool = False,
+    index_result: bool = True,
     custom_headers: Optional[Dict[str, str]] = None,
     cookies: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
@@ -4507,7 +4538,7 @@ async def crawl_paginated(
     session_id: str,
     additional_urls: Optional[List[str]] = None,
     markdown_variant: str = "raw",
-    index_result: bool = False,
+    index_result: bool = True,
     max_concurrent: int = 5,
 ) -> str:
     """Preset wrapper for paginated/load-more style crawls."""
@@ -4640,7 +4671,7 @@ async def crawl_with_browser_config(
     url: str,
     browser_config: Optional[Dict[str, Any]] = None,
     markdown_variant: str = "raw",
-    index_result: bool = False,
+    index_result: bool = True,
     run_config: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Crawl a URL using a per-request safe BrowserConfig override."""
@@ -4767,10 +4798,13 @@ async def _append_variant_chunks(
     if not markdown_value:
         return
     payload["indexed_variants"].append(variant_key)
-    chunks = await chunk_text_according_to_settings(markdown_value)
+    chunk_tuples = await chunk_text_with_heading_metadata(markdown_value)
     reference_meta = _build_reference_metadata(variants)
     now_iso = datetime.now(timezone.utc).isoformat()
-    for chunk_index, chunk in enumerate(chunks):
+    for chunk_index, (chunk, heading_meta) in enumerate(chunk_tuples):
+        heading_path: List[str] = heading_meta.get("heading_path", [])
+        heading_level: int = heading_meta.get("heading_level", 0)
+        embed_text = f"[{' > '.join(heading_path)}]\n\n{chunk}" if heading_path else chunk
         meta = extract_section_info(chunk)
         meta.update(
             {
@@ -4786,12 +4820,15 @@ async def _append_variant_chunks(
                 "content_hash": hashlib.sha256(chunk.encode("utf-8")).hexdigest(),
                 "markdown_index_policy": effective_policy,
                 "index_variants_override": resolved_override,
+                "heading_path": heading_path,
+                "heading_level": heading_level,
             }
         )
         meta.update(reference_meta)
         payload["db_urls"].append(url)
         payload["db_chunks"].append(chunk_index)
         payload["db_contents"].append(chunk)
+        payload["db_embed_texts"].append(embed_text)
         payload["db_metas"].append(meta)
         payload["db_fulldocs"].append(markdown_value)
 
@@ -4814,6 +4851,7 @@ async def _index_markdown_variants_payload(
         "db_contents": [],
         "db_metas": [],
         "db_fulldocs": [],
+        "db_embed_texts": [],
         "indexed_variants": [],
     }
     for variant_key in variant_keys_to_index:
@@ -4834,7 +4872,9 @@ async def _index_markdown_variants_payload(
                 payload["db_metas"],
                 payload["db_chunks"],
                 payload["db_fulldocs"],
+                embed_texts=payload["db_embed_texts"],
             )
+            await index_knowledge_graphs(session, payload["db_urls"], payload["db_contents"])
     else:
         chunks_stored = 0
     return chunks_stored, cast(List[str], payload["indexed_variants"]), resolved_fallback_notes
@@ -4907,7 +4947,7 @@ async def extract_markdown_variants(
     ctx: Context,
     url: str,
     run_config: Optional[Dict[str, Any]] = None,
-    index_result: bool = False,
+    index_result: bool = True,
     index_variants: Optional[str] = None,
 ) -> str:
     """Return raw/fit/cited/references markdown variants (and fit_html)."""
@@ -5320,7 +5360,7 @@ async def index_markdown(
         if validation_error is not None:
             return validation_error
 
-        chunks = await chunk_text_according_to_settings(markdown, strategy=chunking_strategy)
+        chunks = await chunk_text_with_heading_metadata(markdown, strategy=chunking_strategy)
         source_type = _infer_source_type(url)
         effective_run_id = _normalize_run_id(run_id) or _generate_run_id("index")
         payload = _index_markdown_payload(
@@ -5371,6 +5411,7 @@ async def _store_index_markdown_payload(
         payload["db_metas"],
         payload["db_chunks"],
         payload["db_fulldocs"],
+        embed_texts=payload["db_embed_texts"],
     )
     if chunks_stored <= 0:
         return chunks_stored, None
@@ -5385,6 +5426,8 @@ def _index_markdown_meta(
     source_type: str,
     effective_run_id: str,
     metadata: Optional[Dict[str, Any]],
+    heading_path: Optional[List[str]] = None,
+    heading_level: int = 0,
 ) -> Dict[str, Any]:
     now_iso = datetime.now(timezone.utc).isoformat()
     meta = extract_section_info(chunk)
@@ -5400,6 +5443,8 @@ def _index_markdown_meta(
             "is_active": True,
             "content_hash": hashlib.sha256(chunk.encode("utf-8")).hexdigest(),
             "run_id": effective_run_id,
+            "heading_path": heading_path or [],
+            "heading_level": heading_level,
         }
     )
     if metadata:
@@ -5411,7 +5456,7 @@ def _index_markdown_payload(
     *,
     url: str,
     markdown: str,
-    chunks: List[str],
+    chunks: List[tuple],
     source_type: str,
     effective_run_id: str,
     metadata: Optional[Dict[str, Any]],
@@ -5422,11 +5467,16 @@ def _index_markdown_payload(
         "db_contents": [],
         "db_metas": [],
         "db_fulldocs": [],
+        "db_embed_texts": [],
     }
-    for i, chunk in enumerate(chunks):
+    for i, (chunk, heading_meta) in enumerate(chunks):
+        heading_path: List[str] = heading_meta.get("heading_path", [])
+        heading_level: int = heading_meta.get("heading_level", 0)
+        embed_text = f"[{' > '.join(heading_path)}]\n\n{chunk}" if heading_path else chunk
         payload["db_urls"].append(url)
         payload["db_chunks"].append(i)
         payload["db_contents"].append(chunk)
+        payload["db_embed_texts"].append(embed_text)
         payload["db_metas"].append(
             _index_markdown_meta(
                 chunk=chunk,
@@ -5435,6 +5485,8 @@ def _index_markdown_payload(
                 source_type=source_type,
                 effective_run_id=effective_run_id,
                 metadata=metadata,
+                heading_path=heading_path,
+                heading_level=heading_level,
             )
         )
         payload["db_fulldocs"].append(markdown)
@@ -5719,6 +5771,7 @@ async def search_documents_v2(
     as_of: Optional[str] = None,
     recency_bias: float = 0.0,
     include_provenance: bool = False,
+    heading_path_prefix: Optional[List[str]] = None,
 ) -> str:
     """Taxonomy-native retrieval tool."""
     try:
@@ -5729,6 +5782,7 @@ async def search_documents_v2(
                 query,
                 match_count=match_count,
                 filter_metadata=filter_meta or None,
+                heading_path_prefix_filter=heading_path_prefix,
             )
 
         as_of_dt = _parse_datetime_utc(as_of) if as_of else None
@@ -5834,6 +5888,35 @@ async def search_code_examples(
         )
     except Exception as exc:
         logger.error(f"search_code_examples: {exc}", exc_info=True)
+        return json.dumps({"success": False, "query": query, "error": str(exc)}, indent=2)
+
+
+async def search_knowledge_graph(
+    ctx: Context,
+    query: str,
+    match_count: int = 5,
+    depth: int = 2,
+    entity_type: Optional[str] = None,
+) -> str:
+    """
+    Search the knowledge graph for entities and relationships relevant to the query.
+    Only available when USE_GRAPH_INDEX=true.
+
+    Args:
+        ctx: MCP context.
+        query: Natural language query.
+        match_count: Number of seed nodes to retrieve.
+        depth: Graph traversal depth.
+        entity_type: Optional entity type filter (e.g. TOOL, CONCEPT, API).
+    """
+    try:
+        with next(get_session()) as session:
+            results = await _search_knowledge_graph(
+                session, query, match_count=match_count, depth=depth, entity_type_filter=entity_type
+            )
+        return json.dumps({"success": True, "query": query, "results": results}, indent=2)
+    except Exception as exc:
+        logger.error(f"search_knowledge_graph: {exc}", exc_info=True)
         return json.dumps({"success": False, "query": query, "error": str(exc)}, indent=2)
 
 

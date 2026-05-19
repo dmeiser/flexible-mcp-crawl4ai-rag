@@ -17,6 +17,7 @@ class ChunkStrategy(str, Enum):
     SENTENCE = "sentence"
     FIXED = "fixed"
     SEMANTIC = "semantic"
+    HEADING = "heading"
 
 
 class ContentClass(str, Enum):
@@ -59,6 +60,7 @@ class Settings(BaseSettings):
     USE_HYBRID_SEARCH: bool = False
     USE_AGENTIC_RAG: bool = False
     USE_RERANKING: bool = False
+    USE_GRAPH_INDEX: bool = False
 
     # Markdown indexing policy
     MARKDOWN_INDEX_POLICY: MarkdownIndexPolicy = MarkdownIndexPolicy.BOTH_BY_DEFAULT
@@ -96,6 +98,11 @@ class Settings(BaseSettings):
     RERANK_LLM_MODEL_NAME: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     RERANK_LLM_MAX_RETRIES: Optional[int] = None
     RERANK_LLM_RETRY_DELAY_SECONDS: Optional[float] = None
+
+    # 4. Knowledge-graph extraction (requires USE_GRAPH_INDEX=true)
+    KG_LLM_BASE_URL: Optional[str] = None
+    KG_LLM_API_KEY: Optional[str] = None
+    KG_LLM_MODEL_NAME: Optional[str] = None
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -177,6 +184,18 @@ class Settings(BaseSettings):
     @property
     def effective_rerank_retry_delay_seconds(self) -> float:
         return float(self.RERANK_LLM_RETRY_DELAY_SECONDS or self.DEFAULT_LLM_RETRY_DELAY_SECONDS)
+
+    @property
+    def effective_kg_base_url(self) -> Optional[str]:
+        return self.KG_LLM_BASE_URL or self.DEFAULT_LLM_BASE_URL
+
+    @property
+    def effective_kg_api_key(self) -> Optional[str]:
+        return self.KG_LLM_API_KEY or self.DEFAULT_LLM_API_KEY
+
+    @property
+    def effective_kg_model_name(self) -> Optional[str]:
+        return self.KG_LLM_MODEL_NAME or self.DEFAULT_LLM_MODEL_NAME
 
 
 settings = Settings()  # type: ignore[call-arg]

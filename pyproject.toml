@@ -80,3 +80,9 @@ warn_redundant_casts = true
 check_untyped_defs = true
 show_error_codes = true
 pretty = true
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.9",
+    "xenon>=0.9.3",
+]
