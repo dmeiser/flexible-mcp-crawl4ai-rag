@@ -2738,7 +2738,7 @@ async def crawl_to_markdown(
     url: str,
     markdown_variant: str = "raw",
     run_config: Optional[Dict[str, Any]] = None,
-    index_result: bool = False,
+    index_result: bool = True,
     index_variants: Optional[str] = None,
     extraction_strategy: Optional[str] = None,
     extraction_schema: Optional[Dict[str, Any]] = None,
@@ -3044,7 +3044,7 @@ async def crawl_local_file(
     file_path: str,
     markdown_variant: str = "raw",
     run_config: Optional[Dict[str, Any]] = None,
-    index_result: bool = False,
+    index_result: bool = True,
 ) -> str:
     """Crawl local HTML/markdown content via file:// and return markdown variants."""
     try:
@@ -3070,7 +3070,7 @@ async def crawl_raw_html(
     html: str,
     markdown_variant: str = "raw",
     run_config: Optional[Dict[str, Any]] = None,
-    index_result: bool = False,
+    index_result: bool = True,
 ) -> str:
     """Crawl raw HTML content using Crawl4AI's raw: URL mode."""
     try:
@@ -3439,7 +3439,7 @@ async def crawl_url(
     mode: str = "markdown",
     markdown_variant: str = "raw",
     run_config: Optional[Dict[str, Any]] = None,
-    index_result: bool = False,
+    index_result: bool = True,
     index_variants: Optional[str] = None,
     extraction_strategy: Optional[str] = None,
     extraction_schema: Optional[Dict[str, Any]] = None,
@@ -4279,7 +4279,7 @@ async def crawl_with_session(
     session_id: str = "default-session",
     action: str = "reuse",
     markdown_variant: str = "raw",
-    index_result: bool = False,
+    index_result: bool = True,
     run_config: Optional[Dict[str, Any]] = None,
     run_id: Optional[str] = None,
 ) -> str:
@@ -4464,7 +4464,7 @@ async def crawl_with_auth_hooks(
     url: str,
     session_id: str,
     markdown_variant: str = "raw",
-    index_result: bool = False,
+    index_result: bool = True,
     run_config: Optional[Dict[str, Any]] = None,
     custom_headers: Optional[Dict[str, str]] = None,
     cookies: Optional[List[Dict[str, Any]]] = None,
@@ -4511,7 +4511,7 @@ async def crawl_login_required(
     session_id: str,
     login_script: Optional[str] = None,
     markdown_variant: str = "raw",
-    index_result: bool = False,
+    index_result: bool = True,
     custom_headers: Optional[Dict[str, str]] = None,
     cookies: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
@@ -4538,7 +4538,7 @@ async def crawl_paginated(
     session_id: str,
     additional_urls: Optional[List[str]] = None,
     markdown_variant: str = "raw",
-    index_result: bool = False,
+    index_result: bool = True,
     max_concurrent: int = 5,
 ) -> str:
     """Preset wrapper for paginated/load-more style crawls."""
@@ -4671,7 +4671,7 @@ async def crawl_with_browser_config(
     url: str,
     browser_config: Optional[Dict[str, Any]] = None,
     markdown_variant: str = "raw",
-    index_result: bool = False,
+    index_result: bool = True,
     run_config: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Crawl a URL using a per-request safe BrowserConfig override."""
@@ -4947,7 +4947,7 @@ async def extract_markdown_variants(
     ctx: Context,
     url: str,
     run_config: Optional[Dict[str, Any]] = None,
-    index_result: bool = False,
+    index_result: bool = True,
     index_variants: Optional[str] = None,
 ) -> str:
     """Return raw/fit/cited/references markdown variants (and fit_html)."""

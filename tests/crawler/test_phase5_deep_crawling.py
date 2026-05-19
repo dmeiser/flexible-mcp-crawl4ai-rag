@@ -571,6 +571,7 @@ class TestAdditionalToolPathCoverage:
             "https://fallback-url.test",
             extraction_strategy="regex",
             extraction_patterns={"title": r"# (.+)"},
+            index_result=False,
         )
         data = json.loads(result)
         assert data["success"] is True
@@ -583,7 +584,7 @@ class TestAdditionalToolPathCoverage:
         mock_crawler.arun.return_value = mock_result
         ctx = _make_ctx(crawler=mock_crawler)
 
-        out = await td.crawl_to_markdown(ctx, "https://x.com", session_id="  auth-session-1  ")
+        out = await td.crawl_to_markdown(ctx, "https://x.com", session_id="  auth-session-1  ", index_result=False)
         data = json.loads(out)
 
         assert data["success"] is True
@@ -606,6 +607,7 @@ class TestAdditionalToolPathCoverage:
             content_filter="pruning",
             content_filter_query="python",
             content_filter_threshold=0.55,
+            index_result=False,
         )
         data = json.loads(out)
 
